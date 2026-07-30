@@ -57,9 +57,10 @@ type MediaControl struct {
 
 	stopOnce sync.Once
 
-	Errors       chan error
-	Events       chan MediaCtrlResponse
-	OnVideoStart func()
+	Errors          chan error
+	Events          chan MediaCtrlResponse
+	OnVideoStart    func()
+	SupportFunction int
 }
 
 func NewMediaControl(port string) *MediaControl {
@@ -155,7 +156,7 @@ func (s *MediaControl) handleEvent(event *MediaCtrlResponse, conn net.Conn) {
 		s.emitEvent(*event)
 		viewState := View{
 			ViewAreaConfig:  ViewConfig{State: 0},
-			SupportFunction: 0,
+			SupportFunction: s.SupportFunction,
 		}
 		var payload []byte
 		if p, err := json.Marshal(viewState); err != nil {

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/charliecharlieO-o/ridedaemon-go/internal/logging"
 )
@@ -20,15 +21,19 @@ import (
 // establishes connection 2 times, so it's normal for one connection to drop
 // after setting up the speed configuration.
 
-const pxcHeaderSize = 16
+const (
+	pxcHeaderSize             = 16
+	defaultPxcHeartbeatPeriod = 2 * time.Second
+)
 
 // Command requests
 const (
-	PxcHandshake uint32 = 65536
-	PxcHudConf   uint32 = 65552
-	PxcSpeedConf uint32 = 67216
-	PxcHeartbeat uint32 = 1879048192
-	PxcClientSet uint32 = 66528
+	PxcHandshake      uint32 = 65536
+	PxcHudConf        uint32 = 65552
+	PxcSpeedConf      uint32 = 67216
+	PxcHeartbeat      uint32 = 1879048192
+	PxcClientSet      uint32 = 66528
+	PxcChannelCarData uint32 = 0x20000
 
 	// Newer CFDL26 firmware sends additional control notifications before it
 	// opens the media ports. PXC request commands are even and use cmd+1 as ACK.
@@ -70,59 +75,63 @@ type PXCResponse struct {
 }
 
 type HUDConfig struct {
-	HUID                      string `json:"HUID"`
-	HUName                    string `json:"HUName"`
-	BluetoothPolicy           int    `json:"bluetoothPolicy"`
-	BtAddress                 string `json:"btAddress"`
-	BtName                    string `json:"btName"`
-	BtPin                     string `json:"btPin"`
-	CarBrand                  string `json:"carBrand"`
-	CarConfig                 string `json:"carConfig"`
-	CarMicSupportFeature      int    `json:"carMicSupportFeature"`
-	CarModel                  string `json:"carModel"`
-	Channel                   string `json:"channel"`
-	CurrentHUTime             uint   `json:"currentHUTime"`
-	DisablePageInRVMap        int    `json:"disablePageInRVMap"`
-	DisableShowCallInfo       bool   `json:"disableShowCallInfo"`
-	DisableShowInRVInfo       any    `json:"disableShowInRVInfo"`
-	Dpi                       int    `json:"dpi"`
-	EnableDPI                 bool   `json:"enableDPI"`
-	EnableSockServerAuth      bool   `json:"enableSockServerAuth"`
-	Flavor                    int    `json:"flavor"`
-	MirrorMode                int    `json:"mirrorMode"`
-	PackageName               string `json:"package_name"`
-	ProductType               int    `json:"productType"`
-	PxcVersion                string `json:"pxcVersion"`
-	ScreenType                int    `json:"screenType"`
-	SdkVersion                string `json:"sdkVersion"`
-	SocketTimeoutPeriodWifi   int    `json:"socketTimeoutPeriodWifi"`
-	SteeringMode              int    `json:"steeringMode"`
-	SupportBTCall             bool   `json:"supportBTCall"`
-	SupportBTSetting          bool   `json:"supportBTSetting"`
-	SupportBackDesktop        bool   `json:"supportBackDesktop"`
-	SupportBackDesktopNew     bool   `json:"supportBackDesktopNew"`
-	SupportConnect            int    `json:"supportConnect"`
-	SupportDownloadScreenEvt  bool   `json:"supportDownloadScreenEvt"`
-	SupportFunction           int    `json:"supportFunction"`
-	SupportHID                bool   `json:"supportHID"`
-	SupportLandscapeAdaptive  bool   `json:"supportLandscapeAdaptive"`
-	SupportMic                bool   `json:"supportMic"`
-	SupportMirrorOverlayTouch bool   `json:"supportMirrorOverlayTouch"`
-	SupportMirrorReconnect    bool   `json:"supportMirrorReconnect"`
-	SupportOTASpeenUp         bool   `json:"supportOTASpeenUp"`
-	SupportOTAUpdate          bool   `json:"supportOTAUpdate"`
-	SupportPhoneSignal        bool   `json:"supportPhoneSignal"`
-	SupportRVForAdb           bool   `json:"supportRVForAdb"`
-	SupportScreenMirroring    bool   `json:"supportScreenMirroring"`
-	SupportScreenTouch        bool   `json:"supportScreenTouch"`
-	SupportSyncCorrectTime    bool   `json:"supportSyncCorrectTime"`
-	SupportThirdPartyApp      bool   `json:"supportThirdPartyApp"`
-	TransportType             int    `json:"transportType"`
-	UseBTCallRecords          bool   `json:"useBTCallRecords"`
-	UUID                      string `json:"uuid"`
-	VersionCode               string `json:"version_code"`
-	VersionName               string `json:"version_name"`
-	WakeUpWord                string `json:"wakeupWord"`
+	HUID                 string `json:"HUID"`
+	HUName               string `json:"HUName"`
+	BluetoothPolicy      int    `json:"bluetoothPolicy"`
+	BtAddress            string `json:"btAddress"`
+	BtName               string `json:"btName"`
+	BtPin                string `json:"btPin"`
+	CarBrand             string `json:"carBrand"`
+	CarConfig            string `json:"carConfig"`
+	CarMicSupportFeature int    `json:"carMicSupportFeature"`
+	CarModel             string `json:"carModel"`
+	Channel              string `json:"channel"`
+	CurrentHUTime        uint   `json:"currentHUTime"`
+	DisablePageInRVMap   int    `json:"disablePageInRVMap"`
+	DisableShowCallInfo  bool   `json:"disableShowCallInfo"`
+	DisableShowInRVInfo  any    `json:"disableShowInRVInfo"`
+	Dpi                  int    `json:"dpi"`
+	EnableDPI            bool   `json:"enableDPI"`
+	EnableSockServerAuth bool   `json:"enableSockServerAuth"`
+	// Firmware in the field uses a numeric flavor, while the MOTO-HUB simulator
+	// identifies its development profile with a string ("simulator"). The
+	// transport forwards the original HUD_CONFIG to Android and does not need a
+	// normalized value here, so retain the JSON form and accept both variants.
+	Flavor                    json.RawMessage `json:"flavor"`
+	MirrorMode                int             `json:"mirrorMode"`
+	PackageName               string          `json:"package_name"`
+	ProductType               int             `json:"productType"`
+	PxcVersion                string          `json:"pxcVersion"`
+	ScreenType                int             `json:"screenType"`
+	SdkVersion                string          `json:"sdkVersion"`
+	SocketTimeoutPeriodWifi   int             `json:"socketTimeoutPeriodWifi"`
+	SteeringMode              int             `json:"steeringMode"`
+	SupportBTCall             bool            `json:"supportBTCall"`
+	SupportBTSetting          bool            `json:"supportBTSetting"`
+	SupportBackDesktop        bool            `json:"supportBackDesktop"`
+	SupportBackDesktopNew     bool            `json:"supportBackDesktopNew"`
+	SupportConnect            int             `json:"supportConnect"`
+	SupportDownloadScreenEvt  bool            `json:"supportDownloadScreenEvt"`
+	SupportFunction           int             `json:"supportFunction"`
+	SupportHID                bool            `json:"supportHID"`
+	SupportLandscapeAdaptive  bool            `json:"supportLandscapeAdaptive"`
+	SupportMic                bool            `json:"supportMic"`
+	SupportMirrorOverlayTouch bool            `json:"supportMirrorOverlayTouch"`
+	SupportMirrorReconnect    bool            `json:"supportMirrorReconnect"`
+	SupportOTASpeenUp         bool            `json:"supportOTASpeenUp"`
+	SupportOTAUpdate          bool            `json:"supportOTAUpdate"`
+	SupportPhoneSignal        bool            `json:"supportPhoneSignal"`
+	SupportRVForAdb           bool            `json:"supportRVForAdb"`
+	SupportScreenMirroring    bool            `json:"supportScreenMirroring"`
+	SupportScreenTouch        bool            `json:"supportScreenTouch"`
+	SupportSyncCorrectTime    bool            `json:"supportSyncCorrectTime"`
+	SupportThirdPartyApp      bool            `json:"supportThirdPartyApp"`
+	TransportType             int             `json:"transportType"`
+	UseBTCallRecords          bool            `json:"useBTCallRecords"`
+	UUID                      string          `json:"uuid"`
+	VersionCode               string          `json:"version_code"`
+	VersionName               string          `json:"version_name"`
+	WakeUpWord                string          `json:"wakeupWord"`
 }
 
 type PhoneConfig struct {
@@ -156,6 +165,17 @@ type PXCControl struct {
 	KeyPair     *KeyPair
 	HudConfig   *HUDConfig
 	PhoneConfig *PhoneConfig
+
+	connections        sync.Map // map[net.Conn]*pxcConnectionState
+	heartbeatInterval  time.Duration
+	proactiveHeartbeat bool
+}
+
+type pxcConnectionState struct {
+	writeMu       sync.Mutex
+	heartbeatOnce sync.Once
+	done          chan struct{}
+	doneOnce      sync.Once
 }
 
 func NewPXCControl(port string, kp *KeyPair, config *PhoneConfig) *PXCControl {
@@ -168,6 +188,34 @@ func NewPXCControl(port string, kp *KeyPair, config *PhoneConfig) *PXCControl {
 		KeyPair:     kp,
 		PhoneConfig: config,
 	}
+}
+
+// SetProactiveHeartbeat controls the firmware-specific dual-channel keepalive.
+// It is intentionally opt-in so generic T-Boxes retain their existing behavior.
+func (s *PXCControl) SetProactiveHeartbeat(enabled bool) {
+	s.proactiveHeartbeat = enabled
+}
+
+func (s *PXCControl) connectionState(conn net.Conn) *pxcConnectionState {
+	state := &pxcConnectionState{done: make(chan struct{})}
+	actual, _ := s.connections.LoadOrStore(conn, state)
+	return actual.(*pxcConnectionState)
+}
+
+func (s *PXCControl) releaseConnectionState(conn net.Conn) {
+	value, ok := s.connections.LoadAndDelete(conn)
+	if !ok {
+		return
+	}
+	state := value.(*pxcConnectionState)
+	state.doneOnce.Do(func() { close(state.done) })
+}
+
+func (s *PXCControl) heartbeatEvery() time.Duration {
+	if s.heartbeatInterval > 0 {
+		return s.heartbeatInterval
+	}
+	return defaultPxcHeartbeatPeriod
 }
 
 func (s *PXCControl) emitEvent(evt PXCResponse) {
@@ -224,6 +272,10 @@ func (s *PXCControl) buildPC() error {
 }
 
 func (s *PXCControl) writeResponse(res *PXCResponse, conn net.Conn, raw *[]byte) error {
+	state := s.connectionState(conn)
+	state.writeMu.Lock()
+	defer state.writeMu.Unlock()
+
 	if raw == nil && res != nil {
 		// -- build header
 		res.Token = 0 // Padding is always 0 for responses
@@ -262,13 +314,57 @@ func (s *PXCControl) writeResponse(res *PXCResponse, conn net.Conn, raw *[]byte)
 	return nil
 }
 
+// Keep one selected PXC channel alive with empty 0x70000000 frames. A separate
+// loop is required for CAR_CTRL and CAR_DATA because either idle socket can
+// trigger a firmware-side teardown.
+func (s *PXCControl) startChannelHeartbeat(conn net.Conn, channel string) {
+	if !s.proactiveHeartbeat || s.isStopping() {
+		return
+	}
+	state := s.connectionState(conn)
+	state.heartbeatOnce.Do(func() {
+		interval := s.heartbeatEvery()
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			logging.Printf("PXC %s heartbeat started every %s", channel, interval)
+			for {
+				select {
+				case <-s.quit:
+					return
+				case <-state.done:
+					return
+				case <-ticker.C:
+					if err := s.writeResponse(&PXCResponse{Command: PxcHeartbeat}, conn, nil); err != nil {
+						if !s.isStopping() {
+							logging.Printf("PXC %s heartbeat stopped: %v", channel, err)
+						}
+						return
+					}
+				}
+			}
+		}()
+	})
+}
+
 func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 	switch event.Command {
 	case PxcHandshake:
 		response := &PXCResponse{Command: PxcHandshakeOk}
 		if err := s.writeResponse(response, conn, nil); err != nil {
 			s.emitError(&PxcError{PxcWriteErr, err, true})
+			return
 		}
+		s.startChannelHeartbeat(conn, "CAR_CTRL")
+	case PxcChannelCarData:
+		response := &PXCResponse{Command: PxcChannelCarData + 1}
+		if err := s.writeResponse(response, conn, nil); err != nil {
+			s.emitError(&PxcError{PxcWriteErr, err, true})
+			return
+		}
+		s.startChannelHeartbeat(conn, "CAR_DATA")
 	case PxcHudConf:
 		if s.HudConfig != nil {
 			break
@@ -410,8 +506,10 @@ func (s *PXCControl) acceptLoop() {
 
 // Handling a single TCP connection
 func (s *PXCControl) handleConn(conn net.Conn) {
+	s.connectionState(conn)
 	s.tracker.Add(conn)
 	defer func() {
+		s.releaseConnectionState(conn)
 		s.tracker.Remove(conn)
 		_ = conn.Close()
 		s.wg.Done()
@@ -427,6 +525,9 @@ func (s *PXCControl) handleConn(conn net.Conn) {
 		// Read the 16 byte header
 		headerBytes := make([]byte, pxcHeaderSize)
 		if n, err := io.ReadFull(reader, headerBytes); err != nil {
+			if s.isStopping() {
+				return
+			}
 			s.emitError(&PxcError{
 				PxcDecodeErr,
 				fmt.Errorf("error reading header: %v (read %d bytes: %x)", err, n, headerBytes[:n]),
@@ -456,6 +557,9 @@ func (s *PXCControl) handleConn(conn net.Conn) {
 		if request.Size > 0 {
 			payload = make([]byte, request.Size-pxcHeaderSize)
 			if _, err := io.ReadFull(reader, payload); err != nil {
+				if s.isStopping() {
+					return
+				}
 				s.emitError(&PxcError{
 					PxcDecodeErr,
 					fmt.Errorf("[PXCService] read payload failed from %s: %v", conn.RemoteAddr(), err),
@@ -468,6 +572,15 @@ func (s *PXCControl) handleConn(conn net.Conn) {
 
 		// Decide what to do with the event
 		s.handleEvent(request, conn)
+	}
+}
+
+func (s *PXCControl) isStopping() bool {
+	select {
+	case <-s.quit:
+		return true
+	default:
+		return false
 	}
 }
 

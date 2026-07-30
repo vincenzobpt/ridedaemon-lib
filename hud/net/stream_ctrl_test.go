@@ -2,6 +2,7 @@ package net
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"io"
 	"net"
 	"testing"
@@ -53,6 +54,38 @@ func TestMediaStartPreparesConsumerBeforeAcknowledgement(t *testing.T) {
 		t.Fatalf("media start acknowledgement command = %d, want %d", command, MediaCtrlRcv)
 	}
 	_ = client.Close()
+	<-done
+}
+
+func TestScreenConfigReturnsConfiguredSupportFunction(t *testing.T) {
+	control := NewMediaControl(":0")
+	control.SupportFunction = 128
+	server, client := net.Pipe()
+	defer client.Close()
+	done := make(chan struct{})
+	go func() {
+		control.handleEvent(&MediaCtrlResponse{Command: MediaCtrlScreenConf}, server)
+		close(done)
+	}()
+
+	header := make([]byte, mediaCtrlHeaderSize)
+	if _, err := io.ReadFull(client, header); err != nil {
+		t.Fatalf("read screen-config response header: %v", err)
+	}
+	if command := binary.LittleEndian.Uint16(header[0:2]); command != MediaCtrlViewState {
+		t.Fatalf("response command = %d, want %d", command, MediaCtrlViewState)
+	}
+	payload := make([]byte, binary.LittleEndian.Uint16(header[2:4]))
+	if _, err := io.ReadFull(client, payload); err != nil {
+		t.Fatalf("read screen-config response payload: %v", err)
+	}
+	var view View
+	if err := json.Unmarshal(payload, &view); err != nil {
+		t.Fatalf("decode screen-config response: %v", err)
+	}
+	if view.SupportFunction != 128 {
+		t.Fatalf("supportFunction = %d, want 128", view.SupportFunction)
+	}
 	<-done
 }
 

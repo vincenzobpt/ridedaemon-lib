@@ -38,7 +38,7 @@ func main() {
 	desktopStreamer := stream.NewDesktopStreamer(muxSource.Live.(*stream.LiveStreamSource))
 
 	// Build Cfmoto HUD
-	cfmotoHUD := core.NewCfmotoHUD(targetFPS, muxSource)
+	cfmotoHUD := core.NewCfmotoHUD(targetFPS, muxSource, 0)
 	go func() {
 		for err := range cfmotoHUD.Errors {
 			log.Printf("Error: %s\n", err)

@@ -89,7 +89,7 @@ back to a static/no-signal clip when there's no active source.
 
 ```go
 mux := &stream.MuxSource{NoSignal: staticSource, Live: liveSource}
-hud := core.NewCfmotoHUD(30, mux)
+hud := core.NewCfmotoHUD(30, mux, 0)
 
 if err := hud.SearchForHost(ctx, 10*time.Second); err != nil {
     log.Fatal(err)

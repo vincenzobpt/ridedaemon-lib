@@ -49,11 +49,13 @@ type CfmotoHUD struct {
 	running bool
 
 	// Config
-	host        *EcHost
-	targetFPS   int
-	packageName string
-	phoneUUID   uuid.UUID
-	phoneConfig *net.PhoneConfig
+	host                  *EcHost
+	targetFPS             int
+	packageName           string
+	phoneUUID             uuid.UUID
+	phoneConfig           *net.PhoneConfig
+	supportFunction       int
+	proactivePxcHeartbeat bool
 
 	// net management
 	keyPair      *net.KeyPair
@@ -72,15 +74,16 @@ type CfmotoHUD struct {
 	Errors   chan error
 }
 
-func NewCfmotoHUD(targetFPS int, mux *stream.MuxSource) *CfmotoHUD {
+func NewCfmotoHUD(targetFPS int, mux *stream.MuxSource, supportFunction int) *CfmotoHUD {
 	if targetFPS <= 0 {
 		targetFPS = 30
 	}
 	id := uuid.New()
 	pkg := "com.cfmoto.cfmotointernational"
 	return &CfmotoHUD{
-		packageName: pkg,
-		phoneUUID:   id,
+		packageName:     pkg,
+		phoneUUID:       id,
+		supportFunction: supportFunction,
 		phoneConfig: &net.PhoneConfig{
 			PxcVersion:            "1.0.2",
 			PhoneUUID:             id.String(),
@@ -105,14 +108,19 @@ func NewCfmotoHUD(targetFPS int, mux *stream.MuxSource) *CfmotoHUD {
 	}
 }
 
+// SetProactivePxcHeartbeat enables the dual CAR_CTRL/CAR_DATA keepalive used by
+// firmware that tears down idle PXC channels. Configure it before StartStream.
+func (hud *CfmotoHUD) SetProactivePxcHeartbeat(enabled bool) {
+	hud.mu.Lock()
+	defer hud.mu.Unlock()
+	hud.proactivePxcHeartbeat = enabled
+}
+
 func (hud *CfmotoHUD) handleServerEvent(evt any) {
 	now := time.Now()
 	hudEvent := HudEvent{Source: UnknownEventSource, Time: now, Data: evt}
 	switch e := evt.(type) {
 	case net.PXCResponse:
-		if e.Command == net.PxcHeartbeat {
-			break
-		}
 		hudEvent.Source = EventSourcePXC
 		hudEvent.Cmd = int(e.Command)
 		hudEvent.Data = e.Body
@@ -156,10 +164,17 @@ func (hud *CfmotoHUD) handleServerError(err error) {
 	}
 }
 
-func (hud *CfmotoHUD) startPxcEventFwd(s *net.PXCControl) {
-	// PXC Events
+func (hud *CfmotoHUD) startPxcEventFwd(s *net.PXCControl, ready chan<- any) {
+	// One consumer must both signal readiness and forward diagnostics. Multiple
+	// consumers would race because a Go channel delivers each event only once.
 	go func() {
 		for evt := range s.Events {
+			if evt.Command == net.PxcHeartbeat || evt.Command == net.PxcHeartbeatOk {
+				select {
+				case ready <- struct{}{}:
+				default:
+				}
+			}
 			hud.handleServerEvent(evt)
 		}
 	}()
@@ -302,28 +317,16 @@ func (hud *CfmotoHUD) startStream(ctx context.Context, initConn stdnet.Conn) (er
 
 	pxcReady := make(chan any, 1)
 	pxcServer := net.NewPXCControl(":10922", hud.keyPair, hud.phoneConfig)
-	// PXC is ready
-	go func() {
-		for event := range pxcServer.Events {
-			if event.Command == net.PxcHeartbeat {
-				// Notify PXC is ready non-blocking
-				select {
-				case pxcReady <- struct{}{}:
-				default:
-				}
-				return // exit the routine
-			}
-		}
-	}()
+	pxcServer.SetProactiveHeartbeat(hud.proactivePxcHeartbeat)
+	hud.startPxcEventFwd(pxcServer, pxcReady)
 	// PXC error handling
 	go func() {
 		for pxcError := range pxcServer.Errors {
 			hud.handleServerError(pxcError)
 		}
 	}()
-	// hud.startPxcEventFwd(pxcServer) -- uncomment for testing only, too slow!
-
 	mediaControl := net.NewMediaControl(":10921")
+	mediaControl.SupportFunction = hud.supportFunction
 	mediaControl.OnVideoStart = hud.muxSource.PrepareLiveConsumer
 	// -- maybe we could change chunkStep to something smaller to reduce latency?
 	mediaStream := net.NewMediaStream(":10920", hud.muxSource, 0x1000, 3*time.Millisecond)

@@ -65,6 +65,72 @@ func TestUnknownOddPXCResponseIsNotAcknowledged(t *testing.T) {
 	assertNoPXCError(t, control)
 }
 
+func TestHUDConfigAcceptsSimulatorStringFlavor(t *testing.T) {
+	var config HUDConfig
+	if err := json.Unmarshal([]byte(`{"HUID":"MOTO-HUB-TBOX-SIMULATOR","flavor":"simulator"}`), &config); err != nil {
+		t.Fatalf("decode simulator HUD_CONFIG: %v", err)
+	}
+	if string(config.Flavor) != `"simulator"` {
+		t.Fatalf("flavor = %s, want simulator string", config.Flavor)
+	}
+}
+
+func TestProactiveHeartbeatRunsOnBothSelectedPxcChannels(t *testing.T) {
+	tests := []struct {
+		name    string
+		command uint32
+		wantAck uint32
+	}{
+		{name: "CAR_CTRL", command: PxcHandshake, wantAck: PxcHandshakeOk},
+		{name: "CAR_DATA", command: PxcChannelCarData, wantAck: PxcChannelCarData + 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			control := NewPXCControl(":0", nil, nil)
+			control.SetProactiveHeartbeat(true)
+			control.heartbeatInterval = 5 * time.Millisecond
+			responses := handlePXCEventAndReadResponses(
+				t,
+				control,
+				&PXCResponse{Command: test.command},
+				2,
+			)
+			if responses[0].Command != test.wantAck {
+				t.Fatalf("channel ACK = 0x%x, want 0x%x", responses[0].Command, test.wantAck)
+			}
+			if responses[1].Command != PxcHeartbeat || len(responses[1].Body) != 0 {
+				t.Fatalf("heartbeat = command 0x%x body %d bytes", responses[1].Command, len(responses[1].Body))
+			}
+			assertNoPXCError(t, control)
+		})
+	}
+}
+
+func TestProactiveHeartbeatIsOptIn(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	control.heartbeatInterval = 5 * time.Millisecond
+	client, server := stdnet.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	done := make(chan struct{})
+	go func() {
+		control.handleEvent(&PXCResponse{Command: PxcHandshake}, client)
+		close(done)
+	}()
+	if response := readPXCResponse(t, server); response.Command != PxcHandshakeOk {
+		t.Fatalf("handshake ACK = 0x%x, want 0x%x", response.Command, PxcHandshakeOk)
+	}
+	<-done
+	if err := server.SetReadDeadline(time.Now().Add(25 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(server, make([]byte, pxcHeaderSize)); err == nil {
+		t.Fatal("generic profile unexpectedly received a proactive heartbeat")
+	}
+	assertNoPXCError(t, control)
+}
+
 func handlePXCEventAndReadResponses(
 	t *testing.T,
 	control *PXCControl,
@@ -87,28 +153,7 @@ func handlePXCEventAndReadResponses(
 
 	responses := make([]PXCResponse, 0, count)
 	for i := 0; i < count; i++ {
-		header := make([]byte, pxcHeaderSize)
-		if _, err := io.ReadFull(server, header); err != nil {
-			t.Fatalf("read PXC response header %d: %v", i, err)
-		}
-		response := PXCResponse{
-			Command: binary.LittleEndian.Uint32(header[0:4]),
-			Size:    binary.LittleEndian.Uint32(header[4:8]),
-			Magic:   binary.LittleEndian.Uint32(header[8:12]),
-			Token:   binary.LittleEndian.Uint32(header[12:16]),
-		}
-		if response.Size < pxcHeaderSize {
-			t.Fatalf("invalid PXC response size %d", response.Size)
-		}
-		if response.Magic != response.Size^response.Command {
-			t.Fatalf("invalid PXC response magic 0x%x", response.Magic)
-		}
-		body := make([]byte, int(response.Size)-pxcHeaderSize)
-		if _, err := io.ReadFull(server, body); err != nil {
-			t.Fatalf("read PXC response body %d: %v", i, err)
-		}
-		response.Body = body
-		responses = append(responses, response)
+		responses = append(responses, readPXCResponse(t, server))
 	}
 
 	select {
@@ -117,6 +162,31 @@ func handlePXCEventAndReadResponses(
 		t.Fatal("PXC handler did not complete")
 	}
 	return responses
+}
+
+func readPXCResponse(t *testing.T, reader io.Reader) PXCResponse {
+	t.Helper()
+	header := make([]byte, pxcHeaderSize)
+	if _, err := io.ReadFull(reader, header); err != nil {
+		t.Fatalf("read PXC response header: %v", err)
+	}
+	response := PXCResponse{
+		Command: binary.LittleEndian.Uint32(header[0:4]),
+		Size:    binary.LittleEndian.Uint32(header[4:8]),
+		Magic:   binary.LittleEndian.Uint32(header[8:12]),
+		Token:   binary.LittleEndian.Uint32(header[12:16]),
+	}
+	if response.Size < pxcHeaderSize {
+		t.Fatalf("invalid PXC response size %d", response.Size)
+	}
+	if response.Magic != response.Size^response.Command {
+		t.Fatalf("invalid PXC response magic 0x%x", response.Magic)
+	}
+	response.Body = make([]byte, int(response.Size)-pxcHeaderSize)
+	if _, err := io.ReadFull(reader, response.Body); err != nil {
+		t.Fatalf("read PXC response body: %v", err)
+	}
+	return response
 }
 
 func assertNoPXCError(t *testing.T, control *PXCControl) {

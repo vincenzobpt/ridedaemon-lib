@@ -362,6 +362,14 @@ func hasAnnexBNALType(data []byte, wanted byte) bool {
 }
 
 // NextFrame fits our FrameSource interface's NextFrame signature.
+//
+// The head unit's own 0x0072 poll cadence drives this call, so that poll IS
+// the stream pacing: pop strictly FIFO, one AU per poll, no internal
+// re-pacing. Re-sending lastAU to keep cadence is only safe when that AU is
+// an IDR (all-intra streams, where a repeat decodes to the identical
+// picture) — repeating a predicted frame applies its motion residual twice
+// and smears the decoded picture, so predictive streams answer an empty
+// ring with idle and let the decoder hold its last picture.
 func (s *LiveStreamSource) NextFrame(now time.Time) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -375,36 +383,24 @@ func (s *LiveStreamSource) NextFrame(now time.Time) ([]byte, error) {
 		return nil, nil
 	}
 
-	// Advance to a new AU based on target FPS
-	shouldAdvAU := false
-	if s.lastAU == nil {
-		shouldAdvAU = true
-	} else if s.lastAdvance.IsZero() || now.Sub(s.lastAdvance) >= s.interval {
-		shouldAdvAU = true
+	// Pop the next live AU
+	if s.count > 0 {
+		au := s.aus[s.head]
+		s.aus[s.head] = nil // give the garbage collector a hand ;)
+		s.head = (s.head + 1) % s.capacity
+		s.count--
+
+		s.lastAU = au
+		s.lastAdvance = now
+		return au, nil
 	}
 
-	if shouldAdvAU {
-		// Pop the next live AU
-		if s.count > 0 {
-			au := s.aus[s.head]
-			s.aus[s.head] = nil // give the garbage collector a hand ;)
-			s.head = (s.head + 1) % s.capacity
-			s.count--
-
-			s.lastAU = au
-			s.lastAdvance = now
-			return au, nil
-		}
-
-		// No queued frames? we can repeat lastAU or return nil
-		if s.lastAU != nil {
-			s.lastAdvance = now
-			return s.lastAU, nil
-		}
-		return nil, nil
+	// No queued frames? Repeating is only decode-safe for an IDR.
+	if s.lastAU != nil && hasAnnexBNALType(s.lastAU, 5) {
+		s.lastAdvance = now
+		return s.lastAU, nil
 	}
-
-	return nil, nil // idle but we keep cadence
+	return nil, nil
 }
 
 // extractAusFromStream scans `buf` for AUD-delimited AUs in Annex B format

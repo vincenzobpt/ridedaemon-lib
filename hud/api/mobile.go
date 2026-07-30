@@ -90,6 +90,13 @@ type MobileConfig struct {
 	TeardownTimeoutSec  int
 	DiscoveryTimeoutSec int
 	DiscoveryTries      int
+	// SupportFunction is sent in the MediaCtrlScreenConf reply.  Different
+	// dashboards use it as a capability bitmask, so the Android host must be
+	// able to select it from its resolved T-Box profile.
+	SupportFunction int
+	// ProactivePxcHeartbeatEnabled keeps both reverse PXC sockets alive on
+	// firmware profiles known to tear down silent channels.
+	ProactivePxcHeartbeatEnabled bool
 }
 
 func NewMobileConfig(static []byte, fps int, startupTimeoutSec, teardownTimeoutSec, discTimeout, discTries int) *MobileConfig {
@@ -150,14 +157,18 @@ func NewMobileSession(cfg *MobileConfig, cb MobileCallback) (*MobileSession, err
 			return nil, err
 		}
 	}
-	live := stream.NewLiveStreamSource(cfg.TargetFPS, 3*time.Second, 3)
+	// 6 queued AUs ≈ 200ms at 30fps: absorbs producer/poll clock jitter without
+	// dropping frames of a predictive (GOP/intra-refresh) stream, while keeping
+	// worst-case buffered latency low. Overflow still drops the oldest AU.
+	live := stream.NewLiveStreamSource(cfg.TargetFPS, 3*time.Second, 6)
 	ms.mux = &stream.MuxSource{NoSignal: static, Live: live}
 
 	// Build streamer
 	ms.streamer = stream.NewAUStreamer(live)
 
 	// Build hud session
-	ms.hud = core.NewCfmotoHUD(cfg.TargetFPS, ms.mux)
+	ms.hud = core.NewCfmotoHUD(cfg.TargetFPS, ms.mux, cfg.SupportFunction)
+	ms.hud.SetProactivePxcHeartbeat(cfg.ProactivePxcHeartbeatEnabled)
 	go func() {
 		for {
 			select {
