@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charliecharlieO-o/ridedaemon-go/hud/stream"
@@ -20,22 +21,41 @@ type connectionState struct {
 	pollCount    uint64
 }
 
-func buildFramedPacket(body []byte, frameCounter uint32) ([]byte, uint32) {
+// buildFramedPacket wraps one access unit for the dash's data socket.
+//
+// withIndex (the only format MOTO-HUB has ever streamed):
+//
+//	4B length (index + AU) | 4B frame index | Annex-B AU
+//
+// Without it, the format the EasyConn reverse-engineering notes document instead:
+//
+//	4B length (AU) | Annex-B AU
+//
+// A dash that scans for the 00 00 00 01 start code swallows the extra index either
+// way, which is why every unit driven so far works with the indexed form. One that
+// hands the buffer straight to its decoder does not. See
+// [MediaStream.SetPlainFramingAllowed] for who gets to choose.
+func buildFramedPacket(body []byte, frameCounter uint32, withIndex bool) ([]byte, uint32) {
 	idx := frameCounter
 
-	// 4B index
-	idxBytes := make([]byte, 4)
-	binary.LittleEndian.PutUint32(idxBytes, idx)
+	payloadLen := len(body)
+	if withIndex {
+		payloadLen += 4
+	}
 
 	// 4B len
-	totalLen := uint32(len(idxBytes) + len(body))
 	lenBytes := make([]byte, 4)
-	binary.LittleEndian.PutUint32(lenBytes, totalLen)
+	binary.LittleEndian.PutUint32(lenBytes, uint32(payloadLen))
 
 	// data
 	frame := make([]byte, 0, mediaStepFrameSize+len(body))
 	frame = append(frame, lenBytes...)
-	frame = append(frame, idxBytes...)
+	if withIndex {
+		// 4B index
+		idxBytes := make([]byte, 4)
+		binary.LittleEndian.PutUint32(idxBytes, idx)
+		frame = append(frame, idxBytes...)
+	}
 	frame = append(frame, body...)
 
 	return frame, idx
@@ -92,8 +112,42 @@ type MediaStream struct {
 	chunkSize  int           // e.g 0x1000
 	chunkSleep time.Duration // e.g 3 * time.Millisecond
 
+	// Frame format. plainFramingAllowed is set by the host before the session
+	// starts; plainFraming is what the dash actually negotiated. Both default to
+	// false, i.e. the indexed format every working unit has been streamed so far.
+	plainFramingAllowed atomic.Bool
+	plainFraming        atomic.Bool
+
 	// Interface events
 	Errors chan error
+}
+
+// SetPlainFramingAllowed lets the dash's own supportExtendProtocol byte select the
+// un-indexed frame format. Off unless the host asks for it, so a dash it recognises
+// keeps the exact bytes on the wire it gets today whatever it reports. Configure it
+// before Start.
+func (s *MediaStream) SetPlainFramingAllowed(allowed bool) {
+	s.plainFramingAllowed.Store(allowed)
+}
+
+// NegotiatedExtendedProtocol reports the supportExtendProtocol byte echoed in the
+// capture-config reply. It only switches the format when the host allowed it, and
+// returns whether plain (un-indexed) framing is in effect after the call — the
+// caller forwards that to the phone so the decision is visible in field logs, not
+// just in this process's own logging.
+func (s *MediaStream) NegotiatedExtendedProtocol(extended bool) bool {
+	if !s.plainFramingAllowed.Load() {
+		return false
+	}
+	plain := !extended
+	if s.plainFraming.Swap(plain) != plain {
+		if plain {
+			logging.Printf("MediaStream: dash reports supportExtendProtocol=0, dropping the frame index")
+		} else {
+			logging.Printf("MediaStream: dash reports supportExtendProtocol=1, keeping the frame index")
+		}
+	}
+	return plain
 }
 
 func NewMediaStream(port string, src stream.FrameSource, chunkSize int, chunkSleep time.Duration) *MediaStream {
@@ -264,7 +318,7 @@ func (s *MediaStream) handleConn(conn net.Conn) {
 		}
 
 		// Legacy pacing - 4B len + 4B idx + body
-		frame, idx := buildFramedPacket(body, st.frameCounter)
+		frame, idx := buildFramedPacket(body, st.frameCounter, !s.plainFraming.Load())
 		st.frameCounter = (st.frameCounter + 1) & 0x7FFFFFFF
 
 		// Send it chunked, send it paced

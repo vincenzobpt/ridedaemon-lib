@@ -23,7 +23,15 @@ const (
 	UnknownEventSource HudEventSource = iota + 1
 	EventSourcePXC
 	EventSourceMediaControl
+	// EventSourceTransport carries this transport's own decisions (not dash
+	// traffic), so they show up in the phone's field logs.
+	EventSourceTransport
 )
+
+// TransportCmdVideoFraming reports the video frame format negotiated from the
+// dash's supportExtendProtocol byte. Payload: [extendedByte, plainFramingApplied],
+// one byte each, 0 or 1.
+const TransportCmdVideoFraming = 1
 
 type HudEvent struct {
 	Source HudEventSource
@@ -56,6 +64,7 @@ type CfmotoHUD struct {
 	phoneConfig           *net.PhoneConfig
 	supportFunction       int
 	proactivePxcHeartbeat bool
+	plainVideoFraming     bool
 
 	// net management
 	keyPair      *net.KeyPair
@@ -116,6 +125,16 @@ func (hud *CfmotoHUD) SetProactivePxcHeartbeat(enabled bool) {
 	hud.proactivePxcHeartbeat = enabled
 }
 
+// SetPlainVideoFramingAllowed lets a dash that reports supportExtendProtocol=0 pull
+// un-indexed video frames. The host only enables it for firmware it could not
+// identify at all, so no recognised dashboard can change format. Configure it
+// before StartStream.
+func (hud *CfmotoHUD) SetPlainVideoFramingAllowed(allowed bool) {
+	hud.mu.Lock()
+	defer hud.mu.Unlock()
+	hud.plainVideoFraming = allowed
+}
+
 func (hud *CfmotoHUD) handleServerEvent(evt any) {
 	now := time.Now()
 	hudEvent := HudEvent{Source: UnknownEventSource, Time: now, Data: evt}
@@ -128,6 +147,9 @@ func (hud *CfmotoHUD) handleServerEvent(evt any) {
 		hudEvent.Source = EventSourceMediaControl
 		hudEvent.Cmd = int(e.Command)
 		hudEvent.Data = e.Payload
+	case HudEvent:
+		// Already shaped (transport-originated events); forward as-is.
+		hudEvent = e
 	}
 
 	select {
@@ -330,6 +352,26 @@ func (hud *CfmotoHUD) startStream(ctx context.Context, initConn stdnet.Conn) (er
 	mediaControl.OnVideoStart = hud.muxSource.PrepareLiveConsumer
 	// -- maybe we could change chunkStep to something smaller to reduce latency?
 	mediaStream := net.NewMediaStream(":10920", hud.muxSource, 0x1000, 3*time.Millisecond)
+	mediaStream.SetPlainFramingAllowed(hud.plainVideoFraming)
+	// The capture-config exchange is the only place the dash states which frame
+	// format it can parse, and it happens before it opens the data socket. The
+	// outcome is forwarded to the phone: a field log must be able to say which
+	// format was on the wire, or a framing experiment cannot be read at all.
+	mediaControl.OnCaptureNegotiated = func(extended bool) {
+		plain := mediaStream.NegotiatedExtendedProtocol(extended)
+		toByte := func(v bool) byte {
+			if v {
+				return 1
+			}
+			return 0
+		}
+		hud.handleServerEvent(HudEvent{
+			Source: EventSourceTransport,
+			Time:   time.Now(),
+			Cmd:    TransportCmdVideoFraming,
+			Data:   []byte{toByte(extended), toByte(plain)},
+		})
+	}
 
 	// Media error handling
 	go func() {

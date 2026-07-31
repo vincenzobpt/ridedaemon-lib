@@ -61,6 +61,9 @@ type MediaControl struct {
 	Events          chan MediaCtrlResponse
 	OnVideoStart    func()
 	SupportFunction int
+	// OnCaptureNegotiated reports the supportExtendProtocol byte the dash asked for
+	// and we echoed back, once the capture-config reply is on the wire.
+	OnCaptureNegotiated func(extended bool)
 }
 
 func NewMediaControl(port string) *MediaControl {
@@ -151,6 +154,9 @@ func (s *MediaControl) handleEvent(event *MediaCtrlResponse, conn net.Conn) {
 		if err := s.writeResponse(response, conn); err != nil {
 			s.emitError(&CtrlError{CtrlWriteErr, err, true})
 			break
+		}
+		if s.OnCaptureNegotiated != nil && len(payload) >= 9 {
+			s.OnCaptureNegotiated(payload[8] != 0)
 		}
 	case MediaCtrlScreenConf:
 		s.emitEvent(*event)

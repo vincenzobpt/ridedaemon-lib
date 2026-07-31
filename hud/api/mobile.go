@@ -97,6 +97,10 @@ type MobileConfig struct {
 	// ProactivePxcHeartbeatEnabled keeps both reverse PXC sockets alive on
 	// firmware profiles known to tear down silent channels.
 	ProactivePxcHeartbeatEnabled bool
+	// PlainVideoFramingAllowed lets a dash reporting supportExtendProtocol=0 pull
+	// video frames without the 4-byte index. Set it only for dashboards the host
+	// could not identify, so recognised profiles keep today's wire format.
+	PlainVideoFramingAllowed bool
 }
 
 func NewMobileConfig(static []byte, fps int, startupTimeoutSec, teardownTimeoutSec, discTimeout, discTries int) *MobileConfig {
@@ -169,6 +173,7 @@ func NewMobileSession(cfg *MobileConfig, cb MobileCallback) (*MobileSession, err
 	// Build hud session
 	ms.hud = core.NewCfmotoHUD(cfg.TargetFPS, ms.mux, cfg.SupportFunction)
 	ms.hud.SetProactivePxcHeartbeat(cfg.ProactivePxcHeartbeatEnabled)
+	ms.hud.SetPlainVideoFramingAllowed(cfg.PlainVideoFramingAllowed)
 	go func() {
 		for {
 			select {

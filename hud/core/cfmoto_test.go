@@ -54,3 +54,22 @@ func TestSetHostWhenRunningReturnsErrorWithoutPanicking(t *testing.T) {
 		t.Fatal("SetHost() succeeded while the HUD was running")
 	}
 }
+
+func TestVideoFramingDecisionIsForwardedAsTransportEvent(t *testing.T) {
+	hud := NewCfmotoHUD(30, nil, 0)
+
+	hud.handleServerEvent(HudEvent{
+		Source: EventSourceTransport,
+		Cmd:    TransportCmdVideoFraming,
+		Data:   []byte{0, 1},
+	})
+
+	event := <-hud.Events
+	if event.Source != EventSourceTransport || event.Cmd != TransportCmdVideoFraming {
+		t.Fatalf("transport event was rewrapped: %+v", event)
+	}
+	payload, ok := event.Data.([]byte)
+	if !ok || len(payload) != 2 || payload[0] != 0 || payload[1] != 1 {
+		t.Fatalf("transport payload = %+v, want [0 1]", event.Data)
+	}
+}
