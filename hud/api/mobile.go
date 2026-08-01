@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	stdnet "net"
@@ -228,9 +229,21 @@ func (ms *MobileSession) relayEvent(evt core.HudEvent) {
 	src := int(evt.Source)
 	command := evt.Cmd
 
+	// A type switch, not an assertion: PXC bodies arrive as json.RawMessage,
+	// which is a named type over []byte, and an assertion demands an exact
+	// dynamic-type match. Asserting to []byte therefore failed silently for
+	// every PXC event ever relayed - the phone saw a null payload, so T-Box
+	// capabilities never decoded and every dash fell back to the generic
+	// profile, while the session itself worked because the JSON is parsed here
+	// in Go where the body is still intact. Media-control payloads are a plain
+	// []byte and were unaffected, which is why only half the traffic looked
+	// broken.
 	var payload []byte
-	if dta, ok := evt.Data.([]byte); ok {
-		payload = append([]byte(nil), dta...)
+	switch data := evt.Data.(type) {
+	case []byte:
+		payload = append([]byte(nil), data...)
+	case json.RawMessage:
+		payload = append([]byte(nil), data...)
 	}
 
 	if ms.cb != nil {

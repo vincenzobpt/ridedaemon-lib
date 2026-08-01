@@ -1,6 +1,24 @@
 package api
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+	"time"
+
+	"github.com/charliecharlieO-o/ridedaemon-go/hud/core"
+)
+
+type eventCaptureCallback struct {
+	events chan []byte
+}
+
+func (c *eventCaptureCallback) OnError(string, bool) {}
+
+func (c *eventCaptureCallback) OnEvent(_ int64, _ int, _ int, payload []byte) {
+	c.events <- payload
+}
+
+func (c *eventCaptureCallback) OnStopped() {}
 
 func TestBuildAnnexBAUFromAVCCRejectsTruncatedNAL(t *testing.T) {
 	_, err := BuildAnnexBAUFromAVCC([]byte{0, 0, 0, 4, 0x65})
@@ -18,5 +36,50 @@ func TestNewMobileSessionAllowsLiveOnlyMode(t *testing.T) {
 	defer session.StopSession()
 	if session.mux.NoSignal != nil {
 		t.Fatal("live-only session unexpectedly has a static fallback")
+	}
+}
+
+// A PXC body arrives as json.RawMessage. Relaying it through a plain []byte
+// type assertion silently dropped it - see relayEvent - so this pins the shape
+// the phone actually receives.
+func TestRelayEventCopiesJSONRawMessagePayload(t *testing.T) {
+	callback := &eventCaptureCallback{events: make(chan []byte, 1)}
+	session := &MobileSession{cb: callback}
+	payload := json.RawMessage(`{"HUName":"CFDL26"}`)
+
+	session.relayEvent(core.HudEvent{
+		Source: core.EventSourcePXC,
+		Cmd:    65552,
+		Data:   payload,
+	})
+
+	select {
+	case received := <-callback.events:
+		if string(received) != string(payload) {
+			t.Fatalf("payload = %q, want %q", received, payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("PXC event payload was not relayed")
+	}
+}
+
+func TestRelayEventStillCopiesPlainByteSlicePayload(t *testing.T) {
+	callback := &eventCaptureCallback{events: make(chan []byte, 1)}
+	session := &MobileSession{cb: callback}
+	payload := []byte{0x00, 0x04, 0xbb, 0x01}
+
+	session.relayEvent(core.HudEvent{
+		Source: core.EventSourceMediaControl,
+		Cmd:    16,
+		Data:   payload,
+	})
+
+	select {
+	case received := <-callback.events:
+		if string(received) != string(payload) {
+			t.Fatalf("payload = %x, want %x", received, payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("media control event payload was not relayed")
 	}
 }
