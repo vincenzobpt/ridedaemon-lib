@@ -40,17 +40,22 @@ const (
 	PxcOtaFtpInfo       uint32 = 0x103a0
 	PxcMediaFeatureConf uint32 = 0x10020
 	PxcCheckSnResult    uint32 = 0x201c0
+	// The dash asks the phone what time it is. The default branch below would
+	// already answer this with an empty cmd+1, which is what shipped until now;
+	// naming it lets the reply carry the timestamp the request is asking for.
+	PxcHuTimeSync uint32 = 0x10600
 )
 
 // Command responses
 const (
-	PxcHandshakeOk uint32 = 65537
-	PxcPhoneConf   uint32 = 65553
-	PxcSpeedOk     uint32 = 67217
-	PxcHeartbeatOk uint32 = 1879048193
-	PxcClientOk    uint32 = 66529
-	PxcCheckSnAck  uint32 = PxcClientSet + 1
-	PxcCheckSnDone uint32 = PxcCheckSnResult + 1
+	PxcHandshakeOk   uint32 = 65537
+	PxcPhoneConf     uint32 = 65553
+	PxcSpeedOk       uint32 = 67217
+	PxcHeartbeatOk   uint32 = 1879048193
+	PxcClientOk      uint32 = 66529
+	PxcCheckSnAck    uint32 = PxcClientSet + 1
+	PxcCheckSnDone   uint32 = PxcCheckSnResult + 1
+	PxcHuTimeSyncAck uint32 = PxcHuTimeSync + 1
 )
 
 type checkSnRequest struct {
@@ -442,6 +447,17 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 	case PxcCheckSnDone:
 		// The bike acknowledges the phone-originated CHECK_SN_RESULT.
 		s.emitEvent(*event)
+	case PxcHuTimeSync:
+		// Same shape as the default even-command branch - emit, then ACK with
+		// cmd+1 - except the body carries the wall-clock time the dash asked
+		// for instead of being empty.
+		s.emitEvent(*event)
+		body := huTimeSyncAck(event.Body, time.Now())
+		logging.Printf("Answering PXC HU_TIME_SYNC with %d body bytes", len(body))
+		response := &PXCResponse{Command: PxcHuTimeSyncAck, Body: body}
+		if err := s.writeResponse(response, conn, nil); err != nil {
+			s.emitError(&PxcError{PxcWriteErr, err, true})
+		}
 	default:
 		if event.Command&1 == 0 {
 			// Unknown even commands are requests. CFDL26 uses several JSON and
