@@ -44,6 +44,9 @@ const (
 	// already answer this with an empty cmd+1, which is what shipped until now;
 	// naming it lets the reply carry the timestamp the request is asking for.
 	PxcHuTimeSync uint32 = 0x10600
+	// The other clock question, answered with JSON instead of a binary stamp.
+	// Firmware picks one or the other, never both: see querytime.go.
+	PxcQueryTime uint32 = 0x10450
 )
 
 // Command responses
@@ -56,6 +59,7 @@ const (
 	PxcCheckSnAck    uint32 = PxcClientSet + 1
 	PxcCheckSnDone   uint32 = PxcCheckSnResult + 1
 	PxcHuTimeSyncAck uint32 = PxcHuTimeSync + 1
+	PxcQueryTimeAck  uint32 = PxcQueryTime + 1
 )
 
 type checkSnRequest struct {
@@ -174,6 +178,7 @@ type PXCControl struct {
 	connections        sync.Map // map[net.Conn]*pxcConnectionState
 	heartbeatInterval  time.Duration
 	proactiveHeartbeat bool
+	timeZoneID         string
 }
 
 type pxcConnectionState struct {
@@ -199,6 +204,13 @@ func NewPXCControl(port string, kp *KeyPair, config *PhoneConfig) *PXCControl {
 // It is intentionally opt-in so generic T-Boxes retain their existing behavior.
 func (s *PXCControl) SetProactiveHeartbeat(enabled bool) {
 	s.proactiveHeartbeat = enabled
+}
+
+// SetTimeZoneID supplies the host's IANA zone id ("Europe/Rome") for the
+// QUERY_TIME reply. Android knows it authoritatively; Go's own local location is
+// usually nameless on a device. Configure it before Start.
+func (s *PXCControl) SetTimeZoneID(id string) {
+	s.timeZoneID = id
 }
 
 func (s *PXCControl) connectionState(conn net.Conn) *pxcConnectionState {
@@ -455,6 +467,17 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 		body := huTimeSyncAck(event.Body, time.Now())
 		logging.Printf("Answering PXC HU_TIME_SYNC with %d body bytes", len(body))
 		response := &PXCResponse{Command: PxcHuTimeSyncAck, Body: body}
+		if err := s.writeResponse(response, conn, nil); err != nil {
+			s.emitError(&PxcError{PxcWriteErr, err, true})
+		}
+	case PxcQueryTime:
+		// The dashes that ask this ask once, right after the handshake, so a
+		// missed answer is a clock never set rather than one that drifts. The
+		// body is JSON here, not the binary stamp above.
+		s.emitEvent(*event)
+		body := queryTimeAck(time.Now(), s.timeZoneID, s.HudConfig)
+		logging.Printf("Answering PXC QUERY_TIME with %d body bytes", len(body))
+		response := &PXCResponse{Command: PxcQueryTimeAck, Body: body}
 		if err := s.writeResponse(response, conn, nil); err != nil {
 			s.emitError(&PxcError{PxcWriteErr, err, true})
 		}

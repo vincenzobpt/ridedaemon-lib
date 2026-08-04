@@ -102,6 +102,10 @@ type MobileConfig struct {
 	// video frames without the 4-byte index. Set it only for dashboards the host
 	// could not identify, so recognised profiles keep today's wire format.
 	PlainVideoFramingAllowed bool
+	// TimeZoneID is the host's IANA zone id ("Europe/Rome"), sent in the
+	// QUERY_TIME reply. Android must supply it: Go's local location carries no
+	// usable name on a device. Empty falls back to a fixed-offset id.
+	TimeZoneID string
 }
 
 func NewMobileConfig(static []byte, fps int, startupTimeoutSec, teardownTimeoutSec, discTimeout, discTries int) *MobileConfig {
@@ -175,6 +179,7 @@ func NewMobileSession(cfg *MobileConfig, cb MobileCallback) (*MobileSession, err
 	ms.hud = core.NewCfmotoHUD(cfg.TargetFPS, ms.mux, cfg.SupportFunction)
 	ms.hud.SetProactivePxcHeartbeat(cfg.ProactivePxcHeartbeatEnabled)
 	ms.hud.SetPlainVideoFramingAllowed(cfg.PlainVideoFramingAllowed)
+	ms.hud.SetTimeZoneID(cfg.TimeZoneID)
 	go func() {
 		for {
 			select {

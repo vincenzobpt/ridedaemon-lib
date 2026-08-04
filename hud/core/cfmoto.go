@@ -65,6 +65,7 @@ type CfmotoHUD struct {
 	supportFunction       int
 	proactivePxcHeartbeat bool
 	plainVideoFraming     bool
+	timeZoneID            string
 
 	// net management
 	keyPair      *net.KeyPair
@@ -133,6 +134,14 @@ func (hud *CfmotoHUD) SetPlainVideoFramingAllowed(allowed bool) {
 	hud.mu.Lock()
 	defer hud.mu.Unlock()
 	hud.plainVideoFraming = allowed
+}
+
+// SetTimeZoneID supplies the host's IANA zone id for the PXC QUERY_TIME reply.
+// Configure it before StartStream.
+func (hud *CfmotoHUD) SetTimeZoneID(id string) {
+	hud.mu.Lock()
+	defer hud.mu.Unlock()
+	hud.timeZoneID = id
 }
 
 func (hud *CfmotoHUD) handleServerEvent(evt any) {
@@ -340,6 +349,7 @@ func (hud *CfmotoHUD) startStream(ctx context.Context, initConn stdnet.Conn) (er
 	pxcReady := make(chan any, 1)
 	pxcServer := net.NewPXCControl(":10922", hud.keyPair, hud.phoneConfig)
 	pxcServer.SetProactiveHeartbeat(hud.proactivePxcHeartbeat)
+	pxcServer.SetTimeZoneID(hud.timeZoneID)
 	hud.startPxcEventFwd(pxcServer, pxcReady)
 	// PXC error handling
 	go func() {
