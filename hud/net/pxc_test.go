@@ -197,3 +197,68 @@ func assertNoPXCError(t *testing.T, control *PXCControl) {
 	default:
 	}
 }
+
+// A rider's diagnostics export is built entirely from control.Events - never
+// from this package's own log.Printf lines - so an ack that only writes to the
+// wire and never reaches this channel is invisible to everyone except someone
+// running a live adb session. That gap is what left an earlier Voge log unable
+// to confirm whether HU_TIME_SYNC/QUERY_TIME had actually been answered.
+func TestHuTimeSyncEmitsTheAckAsAnEventTooNotJustTheRequest(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	request := &PXCResponse{Command: PxcHuTimeSync, Body: make([]byte, pxcHeaderSize)}
+	responses := handlePXCEventAndReadResponses(t, control, request, 1)
+	if responses[0].Command != PxcHuTimeSyncAck {
+		t.Fatalf("wire ACK command = 0x%x, want 0x%x", responses[0].Command, PxcHuTimeSyncAck)
+	}
+
+	requestEvent := <-control.Events
+	if requestEvent.Command != PxcHuTimeSync {
+		t.Fatalf("first event command = 0x%x, want the request 0x%x", requestEvent.Command, PxcHuTimeSync)
+	}
+	select {
+	case ackEvent := <-control.Events:
+		if ackEvent.Command != PxcHuTimeSyncAck {
+			t.Fatalf("second event command = 0x%x, want the ack 0x%x", ackEvent.Command, PxcHuTimeSyncAck)
+		}
+		if len(ackEvent.Body) != huTimeSyncAckSize {
+			t.Fatalf("emitted ack body length = %d, want %d", len(ackEvent.Body), huTimeSyncAckSize)
+		}
+	default:
+		t.Fatal("the ack itself was never emitted as an event - a rider's log can never confirm it was sent")
+	}
+	assertNoPXCError(t, control)
+}
+
+func TestQueryTimeEmitsTheAckAsAnEventTooNotJustTheRequest(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	control.HudConfig = &HUDConfig{SupportSyncCorrectTime: true, Channel: "37504"}
+	request := &PXCResponse{Command: PxcQueryTime}
+	responses := handlePXCEventAndReadResponses(t, control, request, 1)
+	if responses[0].Command != PxcQueryTimeAck {
+		t.Fatalf("wire ACK command = 0x%x, want 0x%x", responses[0].Command, PxcQueryTimeAck)
+	}
+
+	requestEvent := <-control.Events
+	if requestEvent.Command != PxcQueryTime {
+		t.Fatalf("first event command = 0x%x, want the request 0x%x", requestEvent.Command, PxcQueryTime)
+	}
+	select {
+	case ackEvent := <-control.Events:
+		if ackEvent.Command != PxcQueryTimeAck {
+			t.Fatalf("second event command = 0x%x, want the ack 0x%x", ackEvent.Command, PxcQueryTimeAck)
+		}
+		// SupportSyncCorrectTime is set above, so dateTime must ride along - an
+		// empty or tiny body here would be the same silent regression this test
+		// exists to catch, just on the emitted copy instead of the wire copy.
+		var decoded map[string]any
+		if err := json.Unmarshal(ackEvent.Body, &decoded); err != nil {
+			t.Fatalf("emitted ack body is not JSON: %v", err)
+		}
+		if _, present := decoded["dateTime"]; !present {
+			t.Error("emitted ack body is missing dateTime even though SupportSyncCorrectTime was set")
+		}
+	default:
+		t.Fatal("the ack itself was never emitted as an event - a rider's log can never confirm it was sent")
+	}
+	assertNoPXCError(t, control)
+}

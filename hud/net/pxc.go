@@ -469,7 +469,15 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 		response := &PXCResponse{Command: PxcHuTimeSyncAck, Body: body}
 		if err := s.writeResponse(response, conn, nil); err != nil {
 			s.emitError(&PxcError{PxcWriteErr, err, true})
+			break
 		}
+		// A rider's diagnostics export only ever contains what crosses this
+		// Events channel - never this package's own log.Printf line above - so
+		// without this, nobody outside a live adb session can ever tell the ack
+		// actually went out, let alone how many bytes it carried. That gap is
+		// exactly what made an earlier Voge log unable to confirm or deny this
+		// fix; PxcHudConf's reply was already visible this way, this was not.
+		s.emitEvent(*response)
 	case PxcQueryTime:
 		// The dashes that ask this ask once, right after the handshake, so a
 		// missed answer is a clock never set rather than one that drifts. The
@@ -480,7 +488,11 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 		response := &PXCResponse{Command: PxcQueryTimeAck, Body: body}
 		if err := s.writeResponse(response, conn, nil); err != nil {
 			s.emitError(&PxcError{PxcWriteErr, err, true})
+			break
 		}
+		// See the matching comment on PxcHuTimeSync above: this is the only way
+		// a rider's own diagnostics export can ever show the reply happened.
+		s.emitEvent(*response)
 	default:
 		if event.Command&1 == 0 {
 			// Unknown even commands are requests. CFDL26 uses several JSON and
