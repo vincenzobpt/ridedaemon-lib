@@ -66,6 +66,8 @@ type CfmotoHUD struct {
 	proactivePxcHeartbeat bool
 	plainVideoFraming     bool
 	timeZoneID            string
+	timeZoneOffsetSec     int
+	timeZoneOffsetSet     bool
 
 	// net management
 	keyPair      *net.KeyPair
@@ -142,6 +144,16 @@ func (hud *CfmotoHUD) SetTimeZoneID(id string) {
 	hud.mu.Lock()
 	defer hud.mu.Unlock()
 	hud.timeZoneID = id
+}
+
+// SetTimeZoneOffsetSeconds supplies the host's UTC offset with DST applied, so
+// the clock replies carry the rider's wall clock and not Go's UTC one. See
+// net.PXCControl.SetTimeZoneOffsetSeconds. Configure it before StartStream.
+func (hud *CfmotoHUD) SetTimeZoneOffsetSeconds(seconds int) {
+	hud.mu.Lock()
+	defer hud.mu.Unlock()
+	hud.timeZoneOffsetSec = seconds
+	hud.timeZoneOffsetSet = true
 }
 
 func (hud *CfmotoHUD) handleServerEvent(evt any) {
@@ -350,6 +362,9 @@ func (hud *CfmotoHUD) startStream(ctx context.Context, initConn stdnet.Conn) (er
 	pxcServer := net.NewPXCControl(":10922", hud.keyPair, hud.phoneConfig)
 	pxcServer.SetProactiveHeartbeat(hud.proactivePxcHeartbeat)
 	pxcServer.SetTimeZoneID(hud.timeZoneID)
+	if hud.timeZoneOffsetSet {
+		pxcServer.SetTimeZoneOffsetSeconds(hud.timeZoneOffsetSec)
+	}
 	hud.startPxcEventFwd(pxcServer, pxcReady)
 	// PXC error handling
 	go func() {

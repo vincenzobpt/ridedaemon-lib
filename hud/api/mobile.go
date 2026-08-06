@@ -106,6 +106,12 @@ type MobileConfig struct {
 	// QUERY_TIME reply. Android must supply it: Go's local location carries no
 	// usable name on a device. Empty falls back to a fixed-offset id.
 	TimeZoneID string
+	// TimeZoneOffsetSeconds is the host's UTC offset for right now, DST already
+	// applied. Required with TimeZoneID and applied only alongside it: the id
+	// alone only ever labelled the reply, while the times inside it stayed on
+	// Go's local location - UTC on Android - and dashes were being set hours
+	// wrong. See net.PXCControl.SetTimeZoneOffsetSeconds.
+	TimeZoneOffsetSeconds int
 }
 
 func NewMobileConfig(static []byte, fps int, startupTimeoutSec, teardownTimeoutSec, discTimeout, discTries int) *MobileConfig {
@@ -180,6 +186,12 @@ func NewMobileSession(cfg *MobileConfig, cb MobileCallback) (*MobileSession, err
 	ms.hud.SetProactivePxcHeartbeat(cfg.ProactivePxcHeartbeatEnabled)
 	ms.hud.SetPlainVideoFramingAllowed(cfg.PlainVideoFramingAllowed)
 	ms.hud.SetTimeZoneID(cfg.TimeZoneID)
+	// Only together with the id: an offset on its own would silently pin the
+	// clock replies to UTC for a host that never configured a zone, which is the
+	// very bug this exists to fix.
+	if cfg.TimeZoneID != "" {
+		ms.hud.SetTimeZoneOffsetSeconds(cfg.TimeZoneOffsetSeconds)
+	}
 	go func() {
 		for {
 			select {

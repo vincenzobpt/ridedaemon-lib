@@ -179,6 +179,8 @@ type PXCControl struct {
 	heartbeatInterval  time.Duration
 	proactiveHeartbeat bool
 	timeZoneID         string
+	timeZoneOffsetSec  int
+	timeZoneOffsetSet  bool
 }
 
 type pxcConnectionState struct {
@@ -211,6 +213,52 @@ func (s *PXCControl) SetProactiveHeartbeat(enabled bool) {
 // usually nameless on a device. Configure it before Start.
 func (s *PXCControl) SetTimeZoneID(id string) {
 	s.timeZoneID = id
+}
+
+// SetTimeZoneOffsetSeconds supplies the host's UTC offset, DST already applied,
+// for the clock replies. Configure it before Start.
+//
+// The id alone is not enough and was not enough in the field. On Android, Go's
+// local location is UTC, so an ack built from a plain time.Now() carried a UTC
+// wall clock while announcing the rider's zone by name - a Voge log on 1.1.45
+// (2026-08-06) shows dateTime "05.08.2026 18:06:56" sent at 20:06:56 local, and
+// currentTime equal to time because the offset read off that instant was zero.
+// Dashes that seed their clock from this are set two hours wrong in Italy in
+// summer, which riders reported as the dash losing its clock.
+//
+// The offset is taken rather than resolved from the id because Go embeds no zone
+// database here (no time/tzdata import) and its Android lookup path moved into
+// an APEX module on recent releases, so time.LoadLocation cannot be relied on.
+// Android computes the offset for the current instant, DST included.
+//
+// It is captured once per session: a session running across a DST change would
+// keep the offset it started with, which no ride is long enough to notice.
+func (s *PXCControl) SetTimeZoneOffsetSeconds(seconds int) {
+	s.timeZoneOffsetSec = seconds
+	s.timeZoneOffsetSet = true
+}
+
+// queryTimeAckBody and huTimeSyncAckBody exist so the two clock answers cannot
+// be wired to a bare time.Now() again without a test noticing: the wiring, not
+// the formatting, is what was wrong in the field.
+func (s *PXCControl) queryTimeAckBody() []byte {
+	return queryTimeAck(s.hostNow(), s.timeZoneID, s.HudConfig)
+}
+
+func (s *PXCControl) huTimeSyncAckBody(request []byte) []byte {
+	return huTimeSyncAck(request, s.hostNow())
+}
+
+// hostNow is time.Now() as the phone's own clock reads it. Everything the dash
+// is told about the time must come from here, never from time.Now() directly.
+func (s *PXCControl) hostNow() time.Time {
+	now := time.Now()
+	if !s.timeZoneOffsetSet {
+		// Nothing better to go on than Go's idea of local, which is what every
+		// build before the offset plumbing already sent.
+		return now
+	}
+	return now.In(time.FixedZone(s.timeZoneID, s.timeZoneOffsetSec))
 }
 
 func (s *PXCControl) connectionState(conn net.Conn) *pxcConnectionState {
@@ -464,7 +512,7 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 		// cmd+1 - except the body carries the wall-clock time the dash asked
 		// for instead of being empty.
 		s.emitEvent(*event)
-		body := huTimeSyncAck(event.Body, time.Now())
+		body := s.huTimeSyncAckBody(event.Body)
 		logging.Printf("Answering PXC HU_TIME_SYNC with %d body bytes", len(body))
 		response := &PXCResponse{Command: PxcHuTimeSyncAck, Body: body}
 		if err := s.writeResponse(response, conn, nil); err != nil {
@@ -483,7 +531,7 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 		// missed answer is a clock never set rather than one that drifts. The
 		// body is JSON here, not the binary stamp above.
 		s.emitEvent(*event)
-		body := queryTimeAck(time.Now(), s.timeZoneID, s.HudConfig)
+		body := s.queryTimeAckBody()
 		logging.Printf("Answering PXC QUERY_TIME with %d body bytes", len(body))
 		response := &PXCResponse{Command: PxcQueryTimeAck, Body: body}
 		if err := s.writeResponse(response, conn, nil); err != nil {
