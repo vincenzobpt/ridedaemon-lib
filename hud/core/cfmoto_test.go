@@ -73,3 +73,26 @@ func TestVideoFramingDecisionIsForwardedAsTransportEvent(t *testing.T) {
 		t.Fatalf("transport payload = %+v, want [0 1]", event.Data)
 	}
 }
+
+// The clock answers (the 45-byte 0x10601 body and the 0x10451 dateTime field)
+// have shipped for a while, but a Carbit dash only asks a phone that announced
+// it can answer. Asserting on the marshalled JSON rather than the struct field
+// catches the capability being dropped from the wire as well as being set false.
+func TestPhoneConfigAnnouncesClockSyncSupport(t *testing.T) {
+	hud := NewCfmotoHUD(30, nil, 0)
+	body, err := json.Marshal(hud.phoneConfig)
+	if err != nil {
+		t.Fatalf("Marshal(phoneConfig) error = %v", err)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(body, &sent); err != nil {
+		t.Fatalf("Unmarshal(phoneConfig) error = %v", err)
+	}
+	value, present := sent["supportSyncCorrectTime"]
+	if !present {
+		t.Fatal("CLIENT_INFO reply omits supportSyncCorrectTime, so the dash is never told the phone can answer its clock questions")
+	}
+	if value != true {
+		t.Errorf("supportSyncCorrectTime = %v, want true", value)
+	}
+}

@@ -144,20 +144,28 @@ type HUDConfig struct {
 }
 
 type PhoneConfig struct {
-	PxcVersion            string `json:"pxcVersion"`
-	PhoneUUID             string `json:"phoneUUID"`
-	PhoneBrand            string `json:"phoneBrand"`
-	PhoneModel            string `json:"phoneModel"`
-	PhoneOsVersion        string `json:"phoneOsVersion"`
-	PhoneOs               string `json:"phoneOs"`
-	Package               string `json:"package"`
-	VersionCode           int    `json:"versionCode"`
-	Token                 int    `json:"token"`
-	Pubkey                string `json:"pubkey"`
-	EncryptedHUID         string `json:"encryptedHUID"`
-	BluetoothName         string `json:"bluetoothName"`
-	SupportH264IFrame     bool   `json:"supportH264IFrame"`
-	AppVersionFingerPrint string `json:"appVersionFingerPrint"`
+	PxcVersion        string `json:"pxcVersion"`
+	PhoneUUID         string `json:"phoneUUID"`
+	PhoneBrand        string `json:"phoneBrand"`
+	PhoneModel        string `json:"phoneModel"`
+	PhoneOsVersion    string `json:"phoneOsVersion"`
+	PhoneOs           string `json:"phoneOs"`
+	Package           string `json:"package"`
+	VersionCode       int    `json:"versionCode"`
+	Token             int    `json:"token"`
+	Pubkey            string `json:"pubkey"`
+	EncryptedHUID     string `json:"encryptedHUID"`
+	BluetoothName     string `json:"bluetoothName"`
+	SupportH264IFrame bool   `json:"supportH264IFrame"`
+	// SupportSyncCorrectTime tells the dash the phone can answer its clock
+	// questions. The answers themselves already exist - the 45-byte 0x10601 body
+	// (see hutimesync.go) and the dateTime field of the 0x10451 reply (see
+	// querytime.go) - but a Carbit dash treats these as a two-sided capability,
+	// so a phone that never announces it may simply never be asked. Firmware that
+	// applied an empty ack left the cluster at epoch, 00:00, or plain wrong, so
+	// being asked is what we want.
+	SupportSyncCorrectTime bool   `json:"supportSyncCorrectTime"`
+	AppVersionFingerPrint  string `json:"appVersionFingerPrint"`
 }
 
 type PXCControl struct {
