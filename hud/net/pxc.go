@@ -157,15 +157,19 @@ type PhoneConfig struct {
 	EncryptedHUID     string `json:"encryptedHUID"`
 	BluetoothName     string `json:"bluetoothName"`
 	SupportH264IFrame bool   `json:"supportH264IFrame"`
-	// SupportSyncCorrectTime tells the dash the phone can answer its clock
-	// questions. The answers themselves already exist - the 45-byte 0x10601 body
-	// (see hutimesync.go) and the dateTime field of the 0x10451 reply (see
-	// querytime.go) - but a Carbit dash treats these as a two-sided capability,
-	// so a phone that never announces it may simply never be asked. Firmware that
-	// applied an empty ack left the cluster at epoch, 00:00, or plain wrong, so
-	// being asked is what we want.
-	SupportSyncCorrectTime bool   `json:"supportSyncCorrectTime"`
-	AppVersionFingerPrint  string `json:"appVersionFingerPrint"`
+	// There is deliberately no supportSyncCorrectTime here. It was added on
+	// 2026-08-10 on the theory that a Carbit dash only asks a phone that claims
+	// the capability, and removed the same day: the reference implementation
+	// shipped exactly that claim and then withdrew it, reporting that firmware
+	// which saw it applied the 0x10601 reply aggressively and drove Zontes and
+	// Voge clusters to 00:00 even when their clock was already correct.
+	//
+	// We answer 0x10600 with a full body regardless (see hutimesync.go), which is
+	// the half with evidence behind it - an empty ack is what pushed Morini and
+	// Voge clusters to 1970. Answering when asked costs nothing; advertising for
+	// the work is what caused harm. Do not re-add this without a rider log
+	// showing a dash that stays silent until it is claimed.
+	AppVersionFingerPrint string `json:"appVersionFingerPrint"`
 }
 
 type PXCControl struct {
@@ -253,7 +257,7 @@ func (s *PXCControl) queryTimeAckBody() []byte {
 	return queryTimeAck(s.hostNow(), s.timeZoneID, s.HudConfig)
 }
 
-func (s *PXCControl) huTimeSyncAckBody(request []byte) []byte {
+func (s *PXCControl) huTimeSyncAckBody(request []byte) ([]byte, string) {
 	return huTimeSyncAck(request, s.hostNow())
 }
 
@@ -520,8 +524,11 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 		// cmd+1 - except the body carries the wall-clock time the dash asked
 		// for instead of being empty.
 		s.emitEvent(*event)
-		body := s.huTimeSyncAckBody(event.Body)
-		logging.Printf("Answering PXC HU_TIME_SYNC with %d body bytes", len(body))
+		body, mode := s.huTimeSyncAckBody(event.Body)
+		// mode is the whole diagnosis when a rider reports a wrong cluster clock:
+		// "echo" means the dash already knew the time and we left it alone,
+		// "phone" means its stamp was missing or nonsense and we supplied ours.
+		logging.Printf("Answering PXC HU_TIME_SYNC with %d body bytes, mode=%s", len(body), mode)
 		response := &PXCResponse{Command: PxcHuTimeSyncAck, Body: body}
 		if err := s.writeResponse(response, conn, nil); err != nil {
 			s.emitError(&PxcError{PxcWriteErr, err, true})

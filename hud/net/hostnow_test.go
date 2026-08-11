@@ -83,7 +83,8 @@ func TestHuTimeSyncAckCarriesTheRidersWallClock(t *testing.T) {
 	utcInstant := time.Date(2026, 8, 5, 18, 6, 56, 285*int(time.Millisecond), time.UTC)
 	local := utcInstant.In(time.FixedZone("Europe/Rome", 2*60*60))
 
-	stamp := string(huTimeSyncAck(make([]byte, huTimeSyncEchoBytes), local)[huTimeSyncEchoBytes:])
+	ack, _ := huTimeSyncAck(make([]byte, huTimeSyncEchoBytes), local)
+	stamp := string(ack[huTimeSyncEchoBytes:])
 
 	if !strings.HasPrefix(stamp, "2026-08-05 20:06:56") {
 		t.Errorf("stamp = %q, want local 20:06:56 rather than UTC 18:06:56", stamp)
@@ -107,7 +108,8 @@ func TestAckBodiesAreBuiltFromHostNow(t *testing.T) {
 		t.Errorf("currentTime - time = %v, want the offset %v", got["currentTime"].(float64)-got["time"].(float64), want)
 	}
 
-	stamp := string(control.huTimeSyncAckBody(make([]byte, huTimeSyncEchoBytes))[huTimeSyncEchoBytes:])
+	body, _ := control.huTimeSyncAckBody(make([]byte, huTimeSyncEchoBytes))
+	stamp := string(body[huTimeSyncEchoBytes:])
 	wantStamp := time.Now().In(time.FixedZone("Europe/Rome", 2*60*60)).Format("2006-01-02 15:04")
 	if !strings.HasPrefix(stamp, wantStamp) {
 		t.Errorf("huTimeSyncAckBody stamp = %q, want it to start with the host clock %q", stamp, wantStamp)
