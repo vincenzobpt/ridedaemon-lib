@@ -3,6 +3,7 @@ package net
 import (
 	"bytes"
 	"encoding/binary"
+	"strings"
 	"testing"
 	"time"
 )
@@ -74,7 +75,7 @@ func TestHuTimeSyncEchoesASaneBikeStamp(t *testing.T) {
 	}
 }
 
-func TestHuTimeSyncWritesPhoneTimeWhenTheBikeStampIsNotUsable(t *testing.T) {
+func TestHuTimeSyncWritesPhoneTimeOnlyWhenTheDashSentNothingUsable(t *testing.T) {
 	phoneNow := time.Date(2026, 8, 10, 14, 35, 12, 482_000_000, time.UTC)
 	wantStamp := "2026-08-10 14:35:12.482000000"
 
@@ -83,10 +84,10 @@ func TestHuTimeSyncWritesPhoneTimeWhenTheBikeStampIsNotUsable(t *testing.T) {
 		stamp string
 	}{
 		{"epoch", "1970-01-01 00:00:00.000000000"},
-		{"year below the sane window", "2019-12-31 23:59:59.000000000"},
+		{"epoch with a T separator", "1970-01-01T00:00:00.000000000"},
 		{"all zeroes", string(make([]byte, huTimeSyncStampLen))},
-		{"not a timestamp at all", "hello world, this is junk...."},
-		{"right shape but wrong punctuation", "2026/08/10 14:35:12.482000000"},
+		{"binary junk", "\xde\xad\xbe\xef"},
+		{"too short to be a date", "26-08-10"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -104,8 +105,38 @@ func TestHuTimeSyncWritesPhoneTimeWhenTheBikeStampIsNotUsable(t *testing.T) {
 	}
 }
 
-// A request too short to carry a stamp still has to be answered with a body -
-// an empty 0x10601 is what pushed Morini and Voge clusters to 1970.
+// The regression that made this rule permissive: a stamp the phone cannot parse
+// is far more likely to be a layout nobody taught it than a clock needing help.
+// Rewriting these was measured as clusters landing hours out on four brands.
+func TestHuTimeSyncEchoesStampsItCannotParse(t *testing.T) {
+	phoneNow := time.Date(2019, 3, 4, 5, 6, 7, 0, time.UTC)
+
+	cases := []struct {
+		name  string
+		stamp string
+	}{
+		{"T separator", "2026-08-10T14:35:12.482000000"},
+		{"fewer fractional digits", "2026-08-10 14:35:12.482"},
+		{"no fractional part at all", "2026-08-10 14:35:12"},
+		{"slashes instead of dashes", "2026/08/10 14:35:12.482000000"},
+		{"a year we would once have called insane", "2019-12-31 23:59:59.000000000"},
+		{"trailing NUL padding", "2026-08-10 14:35:12"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := make([]byte, huTimeSyncEchoBytes+huTimeSyncStampLen)
+			copy(request[huTimeSyncEchoBytes:], tc.stamp)
+
+			got, mode := huTimeSyncAck(request, phoneNow)
+			if mode != huTimeSyncModeEcho {
+				t.Fatalf("mode = %q, want %q - this stamp must be handed back untouched", mode, huTimeSyncModeEcho)
+			}
+			if stamp := strings.TrimRight(string(got[huTimeSyncEchoBytes:]), "\x00"); stamp != tc.stamp {
+				t.Errorf("stamp = %q, want the dash's own %q", stamp, tc.stamp)
+			}
+		})
+	}
+}
 func TestHuTimeSyncAnswersAShortRequestWithPhoneTime(t *testing.T) {
 	phoneNow := time.Date(2026, 8, 10, 14, 35, 12, 482_000_000, time.UTC)
 	got, mode := huTimeSyncAck(make([]byte, huTimeSyncEchoBytes), phoneNow)
