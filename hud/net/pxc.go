@@ -311,6 +311,45 @@ func (s *PXCControl) emitError(err error) {
 	}
 }
 
+// connectionError decides whether one connection's failure ends the session.
+//
+// The bike establishes this port twice - CAR_CTRL and CAR_DATA - which the note
+// at the top of this file has called normal since the protocol was first
+// written down, and then stops servicing the channel it has nothing to say on.
+// A dash with no vehicle data to send simply abandons CAR_DATA; our proactive
+// keepalive keeps writing into it until the kernel gives up on the
+// retransmissions, minutes later, with ETIMEDOUT.
+//
+// Marking that fatal took down sessions that were working. Two Voge riders,
+// one on a Samsung SM-S918B and one on a OnePlus, lost the TFT to
+// "read tcp :10922->...: read: connection timed out" - the first of them ten
+// times in a single day of riding - while the surviving PXC channel had
+// answered a heartbeat 546ms and 1429ms earlier respectively, frames were
+// still going out, and a reconnect two seconds later completed the whole
+// handshake against the same dash.
+//
+// So it is fatal only when nothing else is being served here. A dash that
+// really goes away kills every connection, and whichever one notices last finds
+// itself alone and says so - as do the media control and media stream servers,
+// which run their own listeners and report independently.
+func (s *PXCControl) connectionError(conn net.Conn, errType PxcErrorType, cause error) *PxcError {
+	others := s.tracker.Others(conn)
+	if others == 0 {
+		// Left exactly as it was written. A rider's collector groups failures by
+		// the text of this line, so the sentence a real death produces has to go
+		// on reading the same as every death before it.
+		return &PxcError{errType, cause, true}
+	}
+	// The host relays a non-fatal transport error to the rider as a notice, so
+	// this one says what happened before it says what the socket complained
+	// about.
+	return &PxcError{
+		errType,
+		fmt.Errorf("one PXC channel closed, %d still serving the dash: %v", others, cause),
+		false,
+	}
+}
+
 func (s *PXCControl) decodeHeader(payload []byte) (*PXCResponse, error) {
 	if len(payload) < pxcHeaderSize {
 		return nil, errors.New("invalid header")
@@ -431,14 +470,14 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 	case PxcHandshake:
 		response := &PXCResponse{Command: PxcHandshakeOk}
 		if err := s.writeResponse(response, conn, nil); err != nil {
-			s.emitError(&PxcError{PxcWriteErr, err, true})
+			s.emitError(s.connectionError(conn, PxcWriteErr, err))
 			return
 		}
 		s.startChannelHeartbeat(conn, "CAR_CTRL")
 	case PxcChannelCarData:
 		response := &PXCResponse{Command: PxcChannelCarData + 1}
 		if err := s.writeResponse(response, conn, nil); err != nil {
-			s.emitError(&PxcError{PxcWriteErr, err, true})
+			s.emitError(s.connectionError(conn, PxcWriteErr, err))
 			return
 		}
 		s.startChannelHeartbeat(conn, "CAR_DATA")
@@ -466,7 +505,7 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 		} else {
 			response := &PXCResponse{Command: PxcPhoneConf, Body: b}
 			if err = s.writeResponse(response, conn, nil); err != nil {
-				s.emitError(&PxcError{PxcWriteErr, err, true})
+				s.emitError(s.connectionError(conn, PxcWriteErr, err))
 				break
 			}
 			s.emitEvent(*response)
@@ -475,13 +514,13 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 		s.emitEvent(*event)
 		response := &PXCResponse{Command: PxcSpeedOk}
 		if err := s.writeResponse(response, conn, nil); err != nil {
-			s.emitError(&PxcError{PxcWriteErr, err, true})
+			s.emitError(s.connectionError(conn, PxcWriteErr, err))
 		}
 	case PxcClientSet:
 		s.emitEvent(*event)
 		ack := &PXCResponse{Command: PxcCheckSnAck}
 		if err := s.writeResponse(ack, conn, nil); err != nil {
-			s.emitError(&PxcError{PxcWriteErr, err, true})
+			s.emitError(s.connectionError(conn, PxcWriteErr, err))
 			break
 		}
 
@@ -508,13 +547,13 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 		}
 		response := &PXCResponse{Command: PxcCheckSnResult, Body: body}
 		if err := s.writeResponse(response, conn, nil); err != nil {
-			s.emitError(&PxcError{PxcWriteErr, err, true})
+			s.emitError(s.connectionError(conn, PxcWriteErr, err))
 		}
 	case PxcHeartbeat:
 		s.emitEvent(*event) // Necessary to indicate PXC finished
 		response := &PXCResponse{Command: PxcHeartbeatOk}
 		if err := s.writeResponse(response, conn, nil); err != nil {
-			s.emitError(&PxcError{PxcWriteErr, err, true})
+			s.emitError(s.connectionError(conn, PxcWriteErr, err))
 		}
 	case PxcCheckSnDone:
 		// The bike acknowledges the phone-originated CHECK_SN_RESULT.
@@ -531,7 +570,7 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 		logging.Printf("Answering PXC HU_TIME_SYNC with %d body bytes, mode=%s", len(body), mode)
 		response := &PXCResponse{Command: PxcHuTimeSyncAck, Body: body}
 		if err := s.writeResponse(response, conn, nil); err != nil {
-			s.emitError(&PxcError{PxcWriteErr, err, true})
+			s.emitError(s.connectionError(conn, PxcWriteErr, err))
 			break
 		}
 		// A rider's diagnostics export only ever contains what crosses this
@@ -550,7 +589,7 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 		logging.Printf("Answering PXC QUERY_TIME with %d body bytes", len(body))
 		response := &PXCResponse{Command: PxcQueryTimeAck, Body: body}
 		if err := s.writeResponse(response, conn, nil); err != nil {
-			s.emitError(&PxcError{PxcWriteErr, err, true})
+			s.emitError(s.connectionError(conn, PxcWriteErr, err))
 			break
 		}
 		// See the matching comment on PxcHuTimeSync above: this is the only way
@@ -568,7 +607,7 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 			s.emitEvent(*event)
 			response := &PXCResponse{Command: event.Command + 1}
 			if err := s.writeResponse(response, conn, nil); err != nil {
-				s.emitError(&PxcError{PxcWriteErr, err, true})
+				s.emitError(s.connectionError(conn, PxcWriteErr, err))
 			}
 		} else {
 			// Unknown odd commands are responses. Never answer them, otherwise
@@ -631,6 +670,16 @@ func (s *PXCControl) handleConn(conn net.Conn) {
 
 	reader := bufio.NewReader(conn)
 
+	// Retire the connection before judging the failure, never after. When the
+	// dash really goes away every channel fails at once, and whichever one is
+	// judged last has to find an empty tracker and end the session. Judging
+	// first and removing afterwards lets two dying channels each see the other
+	// still listed and call a real death survivable.
+	fail := func(errType PxcErrorType, cause error) {
+		s.tracker.Remove(conn)
+		s.emitError(s.connectionError(conn, errType, cause))
+	}
+
 	logging.Printf("Starting PXC Loop")
 	defer logging.Printf("Stopping PXC Loop")
 	for {
@@ -642,19 +691,11 @@ func (s *PXCControl) handleConn(conn net.Conn) {
 			if s.isStopping() {
 				return
 			}
-			s.emitError(&PxcError{
-				PxcDecodeErr,
-				fmt.Errorf("error reading header: %v (read %d bytes: %x)", err, n, headerBytes[:n]),
-				true,
-			})
+			fail(PxcDecodeErr, fmt.Errorf("error reading header: %v (read %d bytes: %x)", err, n, headerBytes[:n]))
 			return
 		}
 		if req, err := s.decodeHeader(headerBytes); err != nil {
-			s.emitError(&PxcError{
-				PxcDecodeErr,
-				fmt.Errorf("error decoding header: %v", err),
-				true,
-			})
+			fail(PxcDecodeErr, fmt.Errorf("error decoding header: %v", err))
 			return
 		} else {
 			request = req
@@ -674,11 +715,7 @@ func (s *PXCControl) handleConn(conn net.Conn) {
 				if s.isStopping() {
 					return
 				}
-				s.emitError(&PxcError{
-					PxcDecodeErr,
-					fmt.Errorf("[PXCService] read payload failed from %s: %v", conn.RemoteAddr(), err),
-					true,
-				})
+				fail(PxcDecodeErr, fmt.Errorf("[PXCService] read payload failed from %s: %v", conn.RemoteAddr(), err))
 				return
 			}
 			request.Body = payload

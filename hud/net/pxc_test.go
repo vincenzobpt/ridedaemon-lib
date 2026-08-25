@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	stdnet "net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -261,4 +262,133 @@ func TestQueryTimeEmitsTheAckAsAnEventTooNotJustTheRequest(t *testing.T) {
 		t.Fatal("the ack itself was never emitted as an event - a rider's log can never confirm it was sent")
 	}
 	assertNoPXCError(t, control)
+}
+
+// The bike establishes this port twice - CAR_CTRL and CAR_DATA - and then stops
+// servicing the channel it has nothing to say on, which the note at the top of
+// pxc.go has called normal since the protocol was first written down. That
+// socket dies on its own minutes later, with ETIMEDOUT, while the other channel
+// is mid-conversation. Two Voge riders lost the TFT roughly every 18 and every
+// 5 minutes to that being reported as the end of the world: in the first of
+// those logs the surviving channel had answered a heartbeat 546ms before the
+// teardown, and a reconnect two seconds later completed the whole handshake
+// against the same dash.
+func TestAnAbandonedPxcChannelDoesNotEndASessionTheOtherIsStillServing(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	carCtrl, dashCtrl := stdnet.Pipe()
+	defer carCtrl.Close()
+	defer dashCtrl.Close()
+	carData, dashData := stdnet.Pipe()
+	defer carData.Close()
+
+	servePXCConn(t, control, carCtrl)
+	servePXCConn(t, control, carData)
+	waitForPXCConnections(t, control, 2)
+
+	dashData.Close()
+
+	err := readPXCError(t, control)
+	if err.IsFatal() {
+		t.Fatalf("an abandoned PXC channel ended a session the other was still serving: %v", err)
+	}
+	if !strings.Contains(err.Error(), "still serving the dash") {
+		t.Fatalf("the notice a rider can be shown does not say what happened: %v", err)
+	}
+	waitForPXCConnections(t, control, 1)
+}
+
+// The other half of the same decision: a dash that really goes away takes every
+// channel with it at once, and that must still read as the session being over.
+// It is why the connection is retired from the tracker before its failure is
+// judged - judged first, two dying channels would each see the other still
+// listed and call a real death survivable.
+func TestTheLastPxcChannelToDieEndsTheSession(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	carCtrl, dashCtrl := stdnet.Pipe()
+	defer carCtrl.Close()
+	carData, dashData := stdnet.Pipe()
+	defer carData.Close()
+
+	servePXCConn(t, control, carCtrl)
+	servePXCConn(t, control, carData)
+	waitForPXCConnections(t, control, 2)
+
+	dashCtrl.Close()
+	dashData.Close()
+
+	first := readPXCError(t, control)
+	second := readPXCError(t, control)
+	if !first.IsFatal() && !second.IsFatal() {
+		t.Fatalf("both PXC channels died and neither ended the session: %v / %v", first, second)
+	}
+}
+
+// Every dash that opens this port once keeps the behaviour it always had.
+func TestASolePxcChannelFailingIsStillFatal(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	car, dash := stdnet.Pipe()
+	defer car.Close()
+
+	servePXCConn(t, control, car)
+	waitForPXCConnections(t, control, 1)
+
+	dash.Close()
+
+	if err := readPXCError(t, control); !err.IsFatal() {
+		t.Fatalf("the only PXC channel died and the session was left running: %v", err)
+	}
+}
+
+// A failed answer is judged with the connection still listed - unlike a failed
+// read, nothing has retired it, because the loop carries on afterwards. So the
+// count has to exclude the connection it is asked about, or the last channel
+// left would see itself as company and let the session run on with a dash that
+// cannot be written to.
+func TestASolePxcChannelThatCannotBeAnsweredIsFatal(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	car, dash := stdnet.Pipe()
+	defer car.Close()
+	dash.Close()
+
+	control.tracker.Add(car)
+	defer control.tracker.Remove(car)
+
+	control.handleEvent(&PXCResponse{Command: PxcHeartbeat}, car)
+
+	if err := readPXCError(t, control); !err.IsFatal() {
+		t.Fatalf("the only PXC channel could not be answered and the session was left running: %v", err)
+	}
+}
+
+func servePXCConn(t *testing.T, control *PXCControl, conn stdnet.Conn) {
+	t.Helper()
+	control.wg.Add(1)
+	go control.handleConn(conn)
+}
+
+func waitForPXCConnections(t *testing.T, control *PXCControl, want int) {
+	t.Helper()
+	// nil is never a connection this tracker holds, so Others(nil) is the count.
+	deadline := time.Now().Add(time.Second)
+	for control.tracker.Others(nil) != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("PXC connections = %d, want %d", control.tracker.Others(nil), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func readPXCError(t *testing.T, control *PXCControl) FatalError {
+	t.Helper()
+	select {
+	case err := <-control.Errors:
+		fatal, ok := err.(FatalError)
+		if !ok {
+			t.Fatalf("PXC error does not say whether it is fatal: %v", err)
+		}
+		return fatal
+	case <-time.After(time.Second):
+		t.Fatal("no PXC error arrived")
+		return nil
+	}
 }
