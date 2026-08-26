@@ -392,3 +392,40 @@ func readPXCError(t *testing.T, control *PXCControl) FatalError {
 		return nil
 	}
 }
+
+// The notice a rider's log carries has to name the channel and say the dash had stopped answering
+// it. In raw TCP text an abandoned CAR_DATA timing out on our own keepalives and a working channel
+// dying read exactly alike, and telling those apart is the whole question asked by a session that
+// ends mid-ride - a Voge dash lost one two minutes after this fired (2026-08-26).
+func TestTheDemotedPxcNoticeNamesTheAbandonedChannel(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	carCtrl, dashCtrl := stdnet.Pipe()
+	defer carCtrl.Close()
+	defer dashCtrl.Close()
+	carData, dashData := stdnet.Pipe()
+	defer carData.Close()
+
+	servePXCConn(t, control, carCtrl)
+	servePXCConn(t, control, carData)
+	waitForPXCConnections(t, control, 2)
+
+	// The dash opens CAR_DATA - and on a dashboard with no vehicle data to send, that is the last
+	// thing it ever does on this socket.
+	go control.handleEvent(&PXCResponse{Command: PxcChannelCarData}, carData)
+	if ack := readPXCResponse(t, dashData); ack.Command != PxcChannelCarData+1 {
+		t.Fatalf("CAR_DATA was not acknowledged: 0x%x", ack.Command)
+	}
+
+	dashData.Close()
+
+	err := readPXCError(t, control)
+	if err.IsFatal() {
+		t.Fatalf("an abandoned PXC channel ended a session the other was still serving: %v", err)
+	}
+	if !strings.Contains(err.Error(), "CAR_DATA") {
+		t.Fatalf("the notice does not name the channel that died: %v", err)
+	}
+	if !strings.Contains(err.Error(), "keepalive") {
+		t.Fatalf("the notice does not say the dash had stopped answering it: %v", err)
+	}
+}

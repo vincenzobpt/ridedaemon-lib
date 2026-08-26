@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charliecharlieO-o/ridedaemon-go/internal/logging"
@@ -200,6 +201,13 @@ type pxcConnectionState struct {
 	heartbeatOnce sync.Once
 	done          chan struct{}
 	doneOnce      sync.Once
+
+	// What the dash called this connection when it opened it, and how it has behaved since.
+	// None of it changes a decision here; all of it is what a field log needs to tell an
+	// abandoned channel timing out from a working one dying - see channelEpitaph.
+	channel     atomic.Value // string: "CAR_CTRL" | "CAR_DATA"
+	lastRxNanos atomic.Int64
+	beatsSince  atomic.Int64 // keepalives written since the dash last said anything
 }
 
 func NewPXCControl(port string, kp *KeyPair, config *PhoneConfig) *PXCControl {
@@ -279,6 +287,21 @@ func (s *PXCControl) connectionState(conn net.Conn) *pxcConnectionState {
 	return actual.(*pxcConnectionState)
 }
 
+// nameChannel records which of the two reverse channels this connection is, from the request the
+// dash opens it with. Deliberately not folded into startChannelHeartbeat: that returns immediately
+// when the proactive keepalive is off, and a dash without the keepalive is exactly the one whose
+// log needs the name most.
+func (s *PXCControl) nameChannel(conn net.Conn, name string) {
+	s.connectionState(conn).channel.Store(name)
+}
+
+// noteHeard marks the moment the dash last spoke on this connection and clears the run of
+// unanswered keepalives.
+func (s *PXCControl) noteHeard(state *pxcConnectionState) {
+	state.lastRxNanos.Store(time.Now().UnixNano())
+	state.beatsSince.Store(0)
+}
+
 func (s *PXCControl) releaseConnectionState(conn net.Conn) {
 	value, ok := s.connections.LoadAndDelete(conn)
 	if !ok {
@@ -345,9 +368,40 @@ func (s *PXCControl) connectionError(conn net.Conn, errType PxcErrorType, cause 
 	// about.
 	return &PxcError{
 		errType,
-		fmt.Errorf("one PXC channel closed, %d still serving the dash: %v", others, cause),
+		fmt.Errorf(
+			"one PXC channel closed, %d still serving the dash%s: %v",
+			others, s.channelEpitaph(conn), cause,
+		),
 		false,
 	}
+}
+
+// channelEpitaph names the channel that just died and says how long the dash had been ignoring it,
+// or "" when this connection never got as far as naming itself.
+//
+// The raw TCP text is the wrong evidence for the question a field log has to answer. A Voge dash
+// over Wi-Fi Direct ended a healthy twenty-minute session two minutes after one of these closed
+// (2026-08-26), and telling "a channel the dash abandoned at the start, timing out on our own
+// writes" from "a channel that was working until a moment ago" needed this source rather than the
+// log. The run of unanswered keepalives is what separates them: ours went into that socket for the
+// whole ride and nothing ever came back.
+func (s *PXCControl) channelEpitaph(conn net.Conn) string {
+	value, ok := s.connections.Load(conn)
+	if !ok {
+		return ""
+	}
+	state := value.(*pxcConnectionState)
+	name, _ := state.channel.Load().(string)
+	if name == "" {
+		name = "it"
+	}
+	beats := state.beatsSince.Load()
+	last := state.lastRxNanos.Load()
+	if last == 0 {
+		return fmt.Sprintf(" (%s never said anything, %d keepalive(s) unanswered)", name, beats)
+	}
+	silence := time.Since(time.Unix(0, last)).Round(time.Second)
+	return fmt.Sprintf(" (%s last spoke %s ago, %d keepalive(s) unanswered since)", name, silence, beats)
 }
 
 func (s *PXCControl) decodeHeader(payload []byte) (*PXCResponse, error) {
@@ -459,6 +513,7 @@ func (s *PXCControl) startChannelHeartbeat(conn net.Conn, channel string) {
 						}
 						return
 					}
+					state.beatsSince.Add(1)
 				}
 			}
 		}()
@@ -468,6 +523,9 @@ func (s *PXCControl) startChannelHeartbeat(conn net.Conn, channel string) {
 func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 	switch event.Command {
 	case PxcHandshake:
+		// Named before it is answered, not after: a write that fails here produces an error whose
+		// whole value is saying WHICH channel could not be answered.
+		s.nameChannel(conn, "CAR_CTRL")
 		response := &PXCResponse{Command: PxcHandshakeOk}
 		if err := s.writeResponse(response, conn, nil); err != nil {
 			s.emitError(s.connectionError(conn, PxcWriteErr, err))
@@ -475,6 +533,7 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 		}
 		s.startChannelHeartbeat(conn, "CAR_CTRL")
 	case PxcChannelCarData:
+		s.nameChannel(conn, "CAR_DATA")
 		response := &PXCResponse{Command: PxcChannelCarData + 1}
 		if err := s.writeResponse(response, conn, nil); err != nil {
 			s.emitError(s.connectionError(conn, PxcWriteErr, err))
@@ -659,7 +718,7 @@ func (s *PXCControl) acceptLoop() {
 
 // Handling a single TCP connection
 func (s *PXCControl) handleConn(conn net.Conn) {
-	s.connectionState(conn)
+	state := s.connectionState(conn)
 	s.tracker.Add(conn)
 	defer func() {
 		s.releaseConnectionState(conn)
@@ -700,6 +759,7 @@ func (s *PXCControl) handleConn(conn net.Conn) {
 		} else {
 			request = req
 		}
+		s.noteHeard(state)
 
 		// Sanity check
 		if request.Magic != request.Size^request.Command {

@@ -170,6 +170,41 @@ func (s *MediaStream) emitError(err error) {
 	}
 }
 
+// connectionError decides whether one connection's failure ends the session, on the same rule the
+// PXC server has used since a dash's abandoned CAR_DATA channel was found tearing down working
+// sessions: fatal only when nothing else is being served here.
+//
+// The bike is KNOWN to open :10922 twice and abandon one of them; whether it does the same here has
+// not been proven on a dash, so this is the same rule applied to the same shape of listener rather
+// than a fix for a failure already seen on :10920. It can only ever delay a verdict, never invent
+// one: a dash that really goes away kills every connection, and whichever one notices last finds
+// itself alone and says so.
+//
+// The fatal text is unchanged, character for character: failures are grouped downstream by the
+// text of that line, so the sentence a real death produces has to go on reading the same.
+func (s *MediaStream) connectionError(conn net.Conn, errType StrmErrorType, cause error) *StrmError {
+	others := s.tracker.Others(conn)
+	if others == 0 {
+		return &StrmError{errType, cause, true}
+	}
+	return &StrmError{
+		errType,
+		fmt.Errorf("one video channel closed, %d still serving the dash: %v", others, cause),
+		false,
+	}
+}
+
+// isStopping reports our own teardown, so a read or write that CloseAll is about to interrupt does
+// not come back as a fault of the dash's.
+func (s *MediaStream) isStopping() bool {
+	select {
+	case <-s.quit:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *MediaStream) acceptLoop() {
 	defer s.wg.Done()
 
@@ -214,6 +249,15 @@ func (s *MediaStream) handleConn(conn net.Conn) {
 		}
 	}()
 
+	// Retire the connection before judging its failure, never after - see the PXC server's note.
+	fail := func(errType StrmErrorType, cause error) {
+		if s.isStopping() {
+			return
+		}
+		s.tracker.Remove(conn)
+		s.emitError(s.connectionError(conn, errType, cause))
+	}
+
 	header := make([]byte, mediaStepFrameSize)
 	zero4 := []byte{0, 0, 0, 0}
 
@@ -228,18 +272,10 @@ func (s *MediaStream) handleConn(conn net.Conn) {
 		// Read 8 bytes (poll header)
 		if _, err := io.ReadFull(input, header); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				s.emitError(&StrmError{
-					StrmDecodeErr,
-					fmt.Errorf("error reading header: %v", err),
-					true,
-				})
+				fail(StrmDecodeErr, fmt.Errorf("error reading header: %v", err))
 				return
 			}
-			s.emitError(&StrmError{
-				StrmDecodeErr,
-				fmt.Errorf("unknown error reading header: %v", err),
-				true,
-			})
+			fail(StrmDecodeErr, fmt.Errorf("unknown error reading header: %v", err))
 			return
 		}
 
@@ -253,19 +289,11 @@ func (s *MediaStream) handleConn(conn net.Conn) {
 				false,
 			})
 			if _, err := output.Write(zero4); err != nil {
-				s.emitError(&StrmError{
-					StrmWriteErr,
-					fmt.Errorf("error writing idle: %v", err),
-					true,
-				})
+				fail(StrmWriteErr, fmt.Errorf("error writing idle: %v", err))
 				return
 			}
 			if err := output.Flush(); err != nil {
-				s.emitError(&StrmError{
-					StrmWriteErr,
-					fmt.Errorf("error flushing idle: %v", err),
-					true,
-				})
+				fail(StrmWriteErr, fmt.Errorf("error flushing idle: %v", err))
 				return
 			}
 			continue
@@ -278,19 +306,11 @@ func (s *MediaStream) handleConn(conn net.Conn) {
 			s.emitError(&StrmError{StrmUnknownCommandErr, fmt.Errorf("error reading frame: %v", err), false})
 			// we will send an idle 0s body so the connection stays open
 			if _, err = output.Write(zero4); err != nil {
-				s.emitError(&StrmError{
-					StrmWriteErr,
-					fmt.Errorf("MediaStream: error writing idle after src failure: %v", err),
-					true,
-				})
+				fail(StrmWriteErr, fmt.Errorf("MediaStream: error writing idle after src failure: %v", err))
 				return
 			}
 			if err = output.Flush(); err != nil {
-				s.emitError(&StrmError{
-					StrmWriteErr,
-					fmt.Errorf("MediaStream: error flushing idle after src failure: %v", err),
-					true,
-				})
+				fail(StrmWriteErr, fmt.Errorf("MediaStream: error flushing idle after src failure: %v", err))
 				return
 			}
 			continue
@@ -299,19 +319,11 @@ func (s *MediaStream) handleConn(conn net.Conn) {
 		// If no payload is available, send idle 0s
 		if body == nil || len(body) == 0 {
 			if _, err = output.Write(zero4); err != nil {
-				s.emitError(&StrmError{
-					StrmWriteErr,
-					fmt.Errorf("error writing idle: %v", err),
-					true,
-				})
+				fail(StrmWriteErr, fmt.Errorf("error writing idle: %v", err))
 				return
 			}
 			if err = output.Flush(); err != nil {
-				s.emitError(&StrmError{
-					StrmWriteErr,
-					fmt.Errorf("flush error (idle): %v", err),
-					true,
-				})
+				fail(StrmWriteErr, fmt.Errorf("flush error (idle): %v", err))
 				return
 			}
 			continue
@@ -323,11 +335,7 @@ func (s *MediaStream) handleConn(conn net.Conn) {
 
 		// Send it chunked, send it paced
 		if err = sendChunked(output, frame, s.chunkSize, s.chunkSleep); err != nil {
-			s.emitError(&StrmError{
-				StrmWriteErr,
-				fmt.Errorf("error sending chunks (idx=%d): %v", idx, err),
-				true,
-			})
+			fail(StrmWriteErr, fmt.Errorf("error sending chunks (idx=%d): %v", idx, err))
 			return
 		}
 	}

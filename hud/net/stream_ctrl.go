@@ -92,6 +92,47 @@ func (s *MediaControl) emitError(err error) {
 	}
 }
 
+// connectionError decides whether one connection's failure ends the session, on the same rule the
+// PXC server has used since a dash's abandoned CAR_DATA channel was found tearing down working
+// sessions: fatal only when nothing else is being served here.
+//
+// The bike is KNOWN to open :10922 twice and abandon one of them; whether it does the same here has
+// not been proven on a dash, so this is the same rule applied to the same shape of listener rather
+// than a fix for a failure already seen on :10921. It can only ever delay a verdict, never invent
+// one: a dash that really goes away kills every connection, and whichever one notices last finds
+// itself alone and says so.
+//
+// The fatal text is unchanged, character for character: failures are grouped downstream by the
+// text of that line, so the sentence a real death produces has to go on reading the same.
+func (s *MediaControl) connectionError(conn net.Conn, errType CtrlErrorType, cause error) *CtrlError {
+	if s.tracker.Others(conn) == 0 {
+		return &CtrlError{errType, cause, true}
+	}
+	// The host relays a non-fatal transport error to the rider as a notice, so this one says what
+	// happened before it says what the socket complained about.
+	return &CtrlError{
+		errType,
+		fmt.Errorf(
+			"one media control channel closed, %d still serving the dash: %v",
+			s.tracker.Others(conn), cause,
+		),
+		false,
+	}
+}
+
+// isStopping reports our own teardown, so the read that CloseAll is about to interrupt does not
+// come back as a fault. Without it every stop produced a fatal "use of closed network connection"
+// on this port - the first line of a field teardown (2026-08-26), and the one that made a
+// dash-side death look like ours.
+func (s *MediaControl) isStopping() bool {
+	select {
+	case <-s.quit:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *MediaControl) decodeHeader(b []byte) (*MediaCtrlResponse, error) {
 	if len(b) < mediaCtrlHeaderSize {
 		return nil, errors.New("invalid header")
@@ -152,7 +193,7 @@ func (s *MediaControl) handleEvent(event *MediaCtrlResponse, conn net.Conn) {
 		payload := buildMediaCaptureAckPayload(event.Payload)
 		response := &MediaCtrlResponse{Command: MediaCtrlAck, Size: uint16(len(payload)), Payload: payload}
 		if err := s.writeResponse(response, conn); err != nil {
-			s.emitError(&CtrlError{CtrlWriteErr, err, true})
+			s.emitError(s.connectionError(conn, CtrlWriteErr, err))
 			break
 		}
 		if s.OnCaptureNegotiated != nil && len(payload) >= 9 {
@@ -173,7 +214,7 @@ func (s *MediaControl) handleEvent(event *MediaCtrlResponse, conn net.Conn) {
 		}
 		response := &MediaCtrlResponse{Command: MediaCtrlViewState, Size: uint16(len(payload)), Payload: payload}
 		if err := s.writeResponse(response, conn); err != nil {
-			s.emitError(&CtrlError{CtrlWriteErr, err, true})
+			s.emitError(s.connectionError(conn, CtrlWriteErr, err))
 			break
 		}
 	case MediaCtrlChk:
@@ -183,13 +224,13 @@ func (s *MediaControl) handleEvent(event *MediaCtrlResponse, conn net.Conn) {
 		s.emitEvent(*event)
 		response := &MediaCtrlResponse{Command: MediaCtrlRcv, Size: 0}
 		if err := s.writeResponse(response, conn); err != nil {
-			s.emitError(&CtrlError{CtrlWriteErr, err, true})
+			s.emitError(s.connectionError(conn, CtrlWriteErr, err))
 			break
 		}
 	case MediaCtrlPing:
 		response := &MediaCtrlResponse{Command: MediaCtrlPong, Size: 0}
 		if err := s.writeResponse(response, conn); err != nil {
-			s.emitError(&CtrlError{CtrlWriteErr, err, true})
+			s.emitError(s.connectionError(conn, CtrlWriteErr, err))
 			break
 		}
 	default:
@@ -197,7 +238,7 @@ func (s *MediaControl) handleEvent(event *MediaCtrlResponse, conn net.Conn) {
 		// Try to send a default command + 1 empty response
 		response := &MediaCtrlResponse{Command: event.Command + 1, Size: 0}
 		if err := s.writeResponse(response, conn); err != nil {
-			s.emitError(&CtrlError{CtrlWriteErr, err, true})
+			s.emitError(s.connectionError(conn, CtrlWriteErr, err))
 			break
 		}
 	}
@@ -254,6 +295,16 @@ func (s *MediaControl) handleConn(conn net.Conn) {
 
 	reader := bufio.NewReader(conn)
 
+	// Retire the connection before judging its failure, never after: when the dash goes away every
+	// channel fails at once and whichever one is judged last has to find an empty tracker.
+	fail := func(errType CtrlErrorType, cause error) {
+		if s.isStopping() {
+			return
+		}
+		s.tracker.Remove(conn)
+		s.emitError(s.connectionError(conn, errType, cause))
+	}
+
 	logging.Printf("Starting StreamCtrl Loop")
 	defer logging.Printf("Stopping StreamCtrl Loop")
 	for {
@@ -262,21 +313,11 @@ func (s *MediaControl) handleConn(conn net.Conn) {
 		// Read 8 byte header
 		headerBytes := make([]byte, mediaCtrlHeaderSize)
 		if n, err := io.ReadFull(reader, headerBytes); err != nil {
-			s.emitError(
-				&CtrlError{
-					CtrlDecodeErr,
-					fmt.Errorf("error reading header: %v (read %d bytes: %x)", err, n, headerBytes[:n]),
-					true,
-				})
+			fail(CtrlDecodeErr, fmt.Errorf("error reading header: %v (read %d bytes: %x)", err, n, headerBytes[:n]))
 			return
 		}
 		if req, err := s.decodeHeader(headerBytes); err != nil {
-			s.emitError(
-				&CtrlError{
-					CtrlDecodeErr,
-					fmt.Errorf("error decoding header: %v", err),
-					true,
-				})
+			fail(CtrlDecodeErr, fmt.Errorf("error decoding header: %v", err))
 			return
 		} else {
 			request = req
@@ -287,12 +328,7 @@ func (s *MediaControl) handleConn(conn net.Conn) {
 		if request.Size > 0 {
 			payload = make([]byte, request.Size)
 			if _, err := io.ReadFull(reader, payload); err != nil {
-				s.emitError(
-					&CtrlError{
-						CtrlDecodeErr,
-						fmt.Errorf("[MediaControl] read payload failed from %s: %v", conn.RemoteAddr(), err),
-						true,
-					})
+				fail(CtrlDecodeErr, fmt.Errorf("[MediaControl] read payload failed from %s: %v", conn.RemoteAddr(), err))
 				return
 			}
 			request.Payload = payload
