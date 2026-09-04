@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	stdnet "net"
@@ -32,6 +33,17 @@ const (
 // dash's supportExtendProtocol byte. Payload: [extendedByte, plainFramingApplied],
 // one byte each, 0 or 1.
 const TransportCmdVideoFraming = 1
+
+// TransportCmdVideoPulls reports how many frames the dash has actually asked for on
+// the data socket. Payload: [phase, 8 bytes big-endian pull count], where phase is a
+// net.VideoPullPhase.
+//
+// Nothing else in the stack can answer this. The phone counts what it pushes into
+// this library and calls that delivery; a dash that opens every socket, negotiates
+// the picture size, says STREAM_START and then never polls produces exactly the same
+// numbers as one that renders perfectly. Several riders have spent months in that
+// gap, and it can only be closed from here.
+const TransportCmdVideoPulls = 2
 
 type HudEvent struct {
 	Source HudEventSource
@@ -378,6 +390,17 @@ func (hud *CfmotoHUD) startStream(ctx context.Context, initConn stdnet.Conn) (er
 	// -- maybe we could change chunkStep to something smaller to reduce latency?
 	mediaStream := net.NewMediaStream(":10920", hud.muxSource, 0x1000, 3*time.Millisecond)
 	mediaStream.SetPlainFramingAllowed(hud.plainVideoFraming)
+	mediaStream.OnVideoPulls = func(phase net.VideoPullPhase, pulls uint64) {
+		payload := make([]byte, 9)
+		payload[0] = byte(phase)
+		binary.BigEndian.PutUint64(payload[1:], pulls)
+		hud.handleServerEvent(HudEvent{
+			Source: EventSourceTransport,
+			Time:   time.Now(),
+			Cmd:    TransportCmdVideoPulls,
+			Data:   payload,
+		})
+	}
 	// The capture-config exchange is the only place the dash states which frame
 	// format it can parse, and it happens before it opens the data socket. The
 	// outcome is forwarded to the phone: a field log must be able to say which

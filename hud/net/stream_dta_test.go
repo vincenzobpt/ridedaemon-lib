@@ -3,6 +3,7 @@ package net
 import (
 	"context"
 	"encoding/binary"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -178,5 +179,83 @@ func readVideoError(t *testing.T, stream *MediaStream) FatalError {
 	case <-time.After(time.Second):
 		t.Fatal("no video error arrived")
 		return nil
+	}
+}
+
+// idleFrameSource never has anything to send, which is the state a real session is in
+// between encoder frames - the point of these tests is the poll, not the payload.
+type idleFrameSource struct{}
+
+func (idleFrameSource) NextFrame(time.Time) ([]byte, error) { return nil, nil }
+
+type pullReport struct {
+	phase VideoPullPhase
+	pulls uint64
+}
+
+// The whole reason this counter exists: a dash that opens the data socket, says
+// nothing, and goes away is indistinguishable from a working one by every number the
+// phone owns. Here it is distinguishable.
+func TestASilentDashIsReportedAsNeverHavingPulledAFrame(t *testing.T) {
+	stream := NewMediaStream(":0", idleFrameSource{}, 0x1000, time.Millisecond)
+	reports := make(chan pullReport, 8)
+	stream.OnVideoPulls = func(phase VideoPullPhase, pulls uint64) {
+		reports <- pullReport{phase, pulls}
+	}
+	conn, dash := net.Pipe()
+	defer conn.Close()
+
+	serveVideoConn(t, stream, conn)
+	waitForVideoConnections(t, stream, 1)
+
+	if got := readPullReport(t, reports); got.phase != VideoPullSocketOpen || got.pulls != 0 {
+		t.Fatalf("socket open reported as %+v", got)
+	}
+
+	dash.Close()
+
+	if got := readPullReport(t, reports); got.phase != VideoPullSocketClosed || got.pulls != 0 {
+		t.Fatalf("a dash that never asked for a frame reported %+v", got)
+	}
+}
+
+func TestTheDashsFirstPullIsReported(t *testing.T) {
+	stream := NewMediaStream(":0", idleFrameSource{}, 0x1000, time.Millisecond)
+	reports := make(chan pullReport, 8)
+	stream.OnVideoPulls = func(phase VideoPullPhase, pulls uint64) {
+		reports <- pullReport{phase, pulls}
+	}
+	conn, dash := net.Pipe()
+	defer conn.Close()
+	defer dash.Close()
+
+	serveVideoConn(t, stream, conn)
+	waitForVideoConnections(t, stream, 1)
+	if got := readPullReport(t, reports); got.phase != VideoPullSocketOpen {
+		t.Fatalf("socket open reported as %+v", got)
+	}
+
+	poll := make([]byte, mediaStepFrameSize)
+	binary.LittleEndian.PutUint16(poll[0:2], 0x0072)
+	go func() {
+		_, _ = dash.Write(poll)
+		// Drain the idle reply so the writer does not block on the pipe.
+		_, _ = io.ReadFull(dash, make([]byte, 4))
+	}()
+
+	got := readPullReport(t, reports)
+	if got.phase != VideoPullFirst || got.pulls != 1 {
+		t.Fatalf("the first pull reported as %+v, want phase %d count 1", got, VideoPullFirst)
+	}
+}
+
+func readPullReport(t *testing.T, reports chan pullReport) pullReport {
+	t.Helper()
+	select {
+	case report := <-reports:
+		return report
+	case <-time.After(2 * time.Second):
+		t.Fatal("no pull report arrived")
+		return pullReport{}
 	}
 }

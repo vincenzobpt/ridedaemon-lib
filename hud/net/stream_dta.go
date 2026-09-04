@@ -17,9 +17,34 @@ import (
 )
 
 type connectionState struct {
-	frameCounter uint32
-	pollCount    uint64
+	frameCounter   uint32
+	pollCount      uint64
+	lastPullReport time.Time
 }
+
+// VideoPullPhase says why a pull count is being reported, so the phone can tell the
+// three cases apart that a black screen collapses into today.
+type VideoPullPhase byte
+
+const (
+	// VideoPullSocketOpen: the dash connected to the data port. It has not asked
+	// for anything yet, and a session that never gets further than this is a dash
+	// that opened the socket and then went quiet.
+	VideoPullSocketOpen VideoPullPhase = 0
+	// VideoPullFirst: the dash asked for its first frame. This is the only
+	// evidence anywhere in the stack that video is actually being consumed.
+	VideoPullFirst VideoPullPhase = 1
+	// VideoPullProgress: periodic running total while the dash keeps pulling.
+	VideoPullProgress VideoPullPhase = 2
+	// VideoPullSocketClosed: final total for this connection. A zero here is the
+	// diagnosis a rider has been waiting months for: the dash never asked at all.
+	VideoPullSocketClosed VideoPullPhase = 3
+)
+
+// How often a running total is reported while the dash is pulling. Frequent enough
+// that a log covering a short session still shows the stream was alive, rare enough
+// that a 30-minute ride does not fill the rider's log with it.
+const videoPullReportInterval = 5 * time.Second
 
 // buildFramedPacket wraps one access unit for the dash's data socket.
 //
@@ -118,6 +143,13 @@ type MediaStream struct {
 	plainFramingAllowed atomic.Bool
 	plainFraming        atomic.Bool
 
+	// OnVideoPulls, when set before Start, receives every change worth reporting in
+	// how many frames the dash has pulled on a connection: the socket opening, the
+	// first pull, a running total every videoPullReportInterval, and the final count
+	// when the connection ends. Called from the connection's own goroutine, so the
+	// host must not block in it.
+	OnVideoPulls func(phase VideoPullPhase, pulls uint64)
+
 	// Interface events
 	Errors chan error
 }
@@ -148,6 +180,21 @@ func (s *MediaStream) NegotiatedExtendedProtocol(extended bool) bool {
 		}
 	}
 	return plain
+}
+
+// reportPulls hands one pull observation to the host, if it asked for them.
+//
+// Deliberately not derived from anything the phone can already see. Every counter the
+// Android side owns - frames offered, timeouts, rejections - describes the pipe from
+// the encoder into this library's ring buffer, and all of them look perfect while a
+// dash sits there never asking for a byte. This is the other end of that pipe.
+func (s *MediaStream) reportPulls(st *connectionState, phase VideoPullPhase) {
+	report := s.OnVideoPulls
+	if report == nil {
+		return
+	}
+	st.lastPullReport = time.Now()
+	report(phase, st.pollCount)
 }
 
 func NewMediaStream(port string, src stream.FrameSource, chunkSize int, chunkSleep time.Duration) *MediaStream {
@@ -265,6 +312,8 @@ func (s *MediaStream) handleConn(conn net.Conn) {
 		frameCounter: 0,
 		pollCount:    0,
 	}
+	s.reportPulls(st, VideoPullSocketOpen)
+	defer s.reportPulls(st, VideoPullSocketClosed)
 
 	logging.Printf("Starting MediaStream Loop")
 	defer logging.Printf("Stopping MediaStream Loop")
@@ -300,6 +349,12 @@ func (s *MediaStream) handleConn(conn net.Conn) {
 		}
 
 		st.pollCount++
+		if st.pollCount == 1 {
+			logging.Printf("MediaStream: dash pulled its first frame")
+			s.reportPulls(st, VideoPullFirst)
+		} else if time.Since(st.lastPullReport) >= videoPullReportInterval {
+			s.reportPulls(st, VideoPullProgress)
+		}
 
 		body, err := s.src.NextFrame(time.Now())
 		if err != nil {
