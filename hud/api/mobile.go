@@ -102,6 +102,11 @@ type MobileConfig struct {
 	// video frames without the 4-byte index. Set it only for dashboards the host
 	// could not identify, so recognised profiles keep today's wire format.
 	PlainVideoFramingAllowed bool
+	// PageSwitchProbeEnabled sends the phone-to-car page sequence once the dash says
+	// STREAM_START, for one dashboard family that drains the video stream and paints
+	// none of it. Off for everything else: it puts three unsolicited commands on the
+	// wire that no reference implementation sends. See net.PXCControl.SetPageSwitchProbe.
+	PageSwitchProbeEnabled bool
 	// TimeZoneID is the host's IANA zone id ("Europe/Rome"), sent in the
 	// QUERY_TIME reply. Android must supply it: Go's local location carries no
 	// usable name on a device. Empty falls back to a fixed-offset id.
@@ -190,6 +195,7 @@ func NewMobileSession(cfg *MobileConfig, cb MobileCallback) (*MobileSession, err
 	ms.hud = core.NewCfmotoHUD(cfg.TargetFPS, ms.mux, cfg.SupportFunction)
 	ms.hud.SetProactivePxcHeartbeat(cfg.ProactivePxcHeartbeatEnabled)
 	ms.hud.SetPlainVideoFramingAllowed(cfg.PlainVideoFramingAllowed)
+	ms.hud.SetPageSwitchProbe(cfg.PageSwitchProbeEnabled)
 	ms.hud.SetTimeZoneID(cfg.TimeZoneID)
 	// Only together with the id: an offset on its own would silently pin the
 	// clock replies to UTC for a host that never configured a zone, which is the

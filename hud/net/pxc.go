@@ -202,6 +202,15 @@ type PXCControl struct {
 	// queryTimeGrace, when non-zero, overrides defaultQueryTimeGrace. Tests
 	// shrink it; production leaves it at zero.
 	queryTimeGrace time.Duration
+
+	// The phone-to-car page experiment; see pageswitch.go.
+	pageProbe        bool
+	pageProbeOnce    sync.Once
+	pageProbeSpacing time.Duration
+	// OnPageSwitchProbe reports each step of that experiment, including the two ways it
+	// can decline to run, so a rider's log says which command was on the wire when the
+	// panel did or did not move.
+	OnPageSwitchProbe func(step PageSwitchProbeStep, command uint32, err error)
 }
 
 type pxcConnectionState struct {

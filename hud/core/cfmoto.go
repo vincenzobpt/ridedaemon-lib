@@ -45,6 +45,15 @@ const TransportCmdVideoFraming = 1
 // gap, and it can only be closed from here.
 const TransportCmdVideoPulls = 2
 
+// TransportCmdPageSwitchProbe reports one step of the phone-to-car page experiment.
+// Payload: [step, ok, 4 bytes big-endian command], where step is a
+// net.PageSwitchProbeStep and ok is 1 when the command reached the wire.
+//
+// The commands it sends move the DASH's own UI, so the only instrument that can read
+// the result is the rider looking at the panel. These events exist to put a timestamp
+// on each one, so "it lit up" can be matched to the command that preceded it.
+const TransportCmdPageSwitchProbe = 3
+
 type HudEvent struct {
 	Source HudEventSource
 	Time   time.Time
@@ -77,6 +86,7 @@ type CfmotoHUD struct {
 	supportFunction       int
 	proactivePxcHeartbeat bool
 	plainVideoFraming     bool
+	pageSwitchProbe       bool
 	timeZoneID            string
 	timeZoneOffsetSec     int
 	timeZoneOffsetSet     bool
@@ -149,6 +159,16 @@ func (hud *CfmotoHUD) SetPlainVideoFramingAllowed(allowed bool) {
 	hud.mu.Lock()
 	defer hud.mu.Unlock()
 	hud.plainVideoFraming = allowed
+}
+
+// SetPageSwitchProbe enables the phone-to-car page sequence once the dash says
+// STREAM_START. Off by default and meant for one dashboard family that pulls the whole
+// stream and paints none of it; see net.SetPageSwitchProbe for what goes on the wire
+// and why no reference implementation sends it. Configure it before StartStream.
+func (hud *CfmotoHUD) SetPageSwitchProbe(enabled bool) {
+	hud.mu.Lock()
+	defer hud.mu.Unlock()
+	hud.pageSwitchProbe = enabled
 }
 
 // SetTimeZoneID supplies the host's IANA zone id for the PXC QUERY_TIME reply.
@@ -383,6 +403,21 @@ func (hud *CfmotoHUD) startStream(ctx context.Context, initConn stdnet.Conn) (er
 	pxcReady := make(chan any, 1)
 	pxcServer := net.NewPXCControl(":10922", hud.keyPair, hud.phoneConfig)
 	pxcServer.SetProactiveHeartbeat(hud.proactivePxcHeartbeat)
+	pxcServer.SetPageSwitchProbe(hud.pageSwitchProbe)
+	pxcServer.OnPageSwitchProbe = func(step net.PageSwitchProbeStep, command uint32, err error) {
+		payload := make([]byte, 6)
+		payload[0] = byte(step)
+		if err == nil {
+			payload[1] = 1
+		}
+		binary.BigEndian.PutUint32(payload[2:], command)
+		hud.handleServerEvent(HudEvent{
+			Source: EventSourceTransport,
+			Time:   time.Now(),
+			Cmd:    TransportCmdPageSwitchProbe,
+			Data:   payload,
+		})
+	}
 	pxcServer.SetTimeZoneID(hud.timeZoneID)
 	if hud.timeZoneOffsetSet {
 		pxcServer.SetTimeZoneOffsetSeconds(hud.timeZoneOffsetSec)
@@ -397,7 +432,13 @@ func (hud *CfmotoHUD) startStream(ctx context.Context, initConn stdnet.Conn) (er
 	}()
 	mediaControl := net.NewMediaControl(":10921")
 	mediaControl.SupportFunction = hud.supportFunction
-	mediaControl.OnVideoStart = hud.muxSource.PrepareLiveConsumer
+	// STREAM_START is the latest moment that still precedes a single painted pixel: the
+	// dash has negotiated the capture and said it wants the stream. If a page command is
+	// what unblocks its UI, this is where it belongs.
+	mediaControl.OnVideoStart = func() {
+		hud.muxSource.PrepareLiveConsumer()
+		pxcServer.StartPageSwitchProbe()
+	}
 	// -- maybe we could change chunkStep to something smaller to reduce latency?
 	mediaStream := net.NewMediaStream(":10920", hud.muxSource, 0x1000, 3*time.Millisecond)
 	mediaStream.SetPlainFramingAllowed(hud.plainVideoFraming)
