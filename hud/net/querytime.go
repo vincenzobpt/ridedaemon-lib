@@ -27,6 +27,19 @@ const (
 	queryTimeColonDateLayout = "02:01:2006 15:04:05"
 	queryTimeColonDateModelA = "21312"
 	queryTimeColonDateModelB = "21313"
+
+	// How long to wait after CLIENT_INFO before pushing time that was never
+	// asked for. A Voge that already syncs (VOGE-5G-b780) sends 0x10450 within
+	// ~150ms of the handshake; a unit that reconnects through CHECK_SN and
+	// never asks (log 2026-09-02, VOGE-5G-dafc) waits out this window and then
+	// gets the same JSON ACK the asking path already sends.
+	defaultQueryTimeGrace = 2 * time.Second
+
+	// currentHUTime below this is boot/uptime milliseconds, not a 2024+ wall
+	// clock. 1e11 ms is March 1973; a live Voge reports ~1.7e12 when its clock
+	// is set and ~3e6 after EasyConn leaves it on uptime (01.01.1970 on the
+	// TFT). uint64 so the 32-bit Android ABI gomobile still builds.
+	huTimeUptimeCeiling uint64 = 100_000_000_000
 )
 
 type queryTimeReply struct {
@@ -96,4 +109,14 @@ func queryTimeDateTime(now time.Time, huModel string) string {
 		layout = queryTimeColonDateLayout
 	}
 	return fmt.Sprintf("%s:%03d", now.Format(layout), now.Nanosecond()/int(time.Millisecond))
+}
+
+// huTimeLooksLikeUptime is the first half of the gate that decides whether to
+// push an unsolicited 0x10451. The second half is "the dash never sent
+// 0x10450". A dash that already asks for the time is never given a second
+// packet: the solicited handler answers it and cancels the wait. Only a unit
+// whose clock field is still an uptime counter AND that skipped QUERY_TIME
+// gets the extra packet — the same body queryTimeAck already builds.
+func huTimeLooksLikeUptime(huTime uint64) bool {
+	return huTime < huTimeUptimeCeiling
 }

@@ -96,7 +96,7 @@ type HUDConfig struct {
 	CarMicSupportFeature int    `json:"carMicSupportFeature"`
 	CarModel             string `json:"carModel"`
 	Channel              string `json:"channel"`
-	CurrentHUTime        uint   `json:"currentHUTime"`
+	CurrentHUTime        uint64 `json:"currentHUTime"`
 	DisablePageInRVMap   int    `json:"disablePageInRVMap"`
 	DisableShowCallInfo  bool   `json:"disableShowCallInfo"`
 	DisableShowInRVInfo  any    `json:"disableShowInRVInfo"`
@@ -194,6 +194,14 @@ type PXCControl struct {
 	timeZoneID         string
 	timeZoneOffsetSec  int
 	timeZoneOffsetSet  bool
+	skipDashClockSync  bool
+
+	queryTimeMu            sync.Mutex
+	queryTimeAnswered      bool
+	proactiveQueryTimeOnce sync.Once
+	// queryTimeGrace, when non-zero, overrides defaultQueryTimeGrace. Tests
+	// shrink it; production leaves it at zero.
+	queryTimeGrace time.Duration
 }
 
 type pxcConnectionState struct {
@@ -258,10 +266,23 @@ func (s *PXCControl) SetTimeZoneOffsetSeconds(seconds int) {
 	s.timeZoneOffsetSet = true
 }
 
+// SetSkipDashClockSync answers 0x10450 with an empty 0x10451 and never pushes
+// an unsolicited clock JSON. Some SSDQ01-0120 units (VOGE-5G-dc41 logs) ask
+// for time, ignore the JSON, and keep currentHUTime as uptime — 01.01.1970
+// on the TFT. Writing millis there does not fix them and can clobber a clock
+// the rider set by hand. Handshake still completes; the dash is just not told
+// a wall clock. Configure it before Start.
+func (s *PXCControl) SetSkipDashClockSync(skip bool) {
+	s.skipDashClockSync = skip
+}
+
 // queryTimeAckBody and huTimeSyncAckBody exist so the two clock answers cannot
 // be wired to a bare time.Now() again without a test noticing: the wiring, not
 // the formatting, is what was wrong in the field.
 func (s *PXCControl) queryTimeAckBody() []byte {
+	if s.skipDashClockSync {
+		return nil
+	}
 	return queryTimeAck(s.hostNow(), s.timeZoneID, s.HudConfig)
 }
 
@@ -279,6 +300,72 @@ func (s *PXCControl) hostNow() time.Time {
 		return now
 	}
 	return now.In(time.FixedZone(s.timeZoneID, s.timeZoneOffsetSec))
+}
+
+func (s *PXCControl) noteQueryTimeAnswered() {
+	s.queryTimeMu.Lock()
+	s.queryTimeAnswered = true
+	s.queryTimeMu.Unlock()
+}
+
+func (s *PXCControl) queryTimeGracePeriod() time.Duration {
+	if s.queryTimeGrace > 0 {
+		return s.queryTimeGrace
+	}
+	return defaultQueryTimeGrace
+}
+
+// maybeScheduleProactiveQueryTime pushes one 0x10451 if this dash reports an
+// unset clock and never asks 0x10450. A dash that already asks is unchanged:
+// the solicited handler marks the question answered and this wait exits.
+// SkipDashClockSync also bails out: those units must not receive clock JSON.
+func (s *PXCControl) maybeScheduleProactiveQueryTime(conn net.Conn) {
+	if s.skipDashClockSync {
+		return
+	}
+	if s.HudConfig == nil || !huTimeLooksLikeUptime(s.HudConfig.CurrentHUTime) {
+		return
+	}
+	huTime := s.HudConfig.CurrentHUTime
+	s.proactiveQueryTimeOnce.Do(func() {
+		state := s.connectionState(conn)
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			timer := time.NewTimer(s.queryTimeGracePeriod())
+			defer timer.Stop()
+			select {
+			case <-s.quit:
+				return
+			case <-state.done:
+				return
+			case <-timer.C:
+			}
+			s.queryTimeMu.Lock()
+			already := s.queryTimeAnswered
+			if !already {
+				s.queryTimeAnswered = true
+			}
+			s.queryTimeMu.Unlock()
+			if already {
+				return
+			}
+			body := s.queryTimeAckBody()
+			logging.Printf(
+				"PXC QUERY_TIME never arrived (currentHUTime=%d); sending unsolicited ACK with %d body bytes",
+				huTime,
+				len(body),
+			)
+			response := &PXCResponse{Command: PxcQueryTimeAck, Body: body}
+			if err := s.writeResponse(response, conn, nil); err != nil {
+				if !s.isStopping() {
+					s.emitError(&PxcError{PxcWriteErr, err, false})
+				}
+				return
+			}
+			s.emitEvent(*response)
+		}()
+	})
 }
 
 func (s *PXCControl) connectionState(conn net.Conn) *pxcConnectionState {
@@ -568,6 +655,7 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 				break
 			}
 			s.emitEvent(*response)
+			s.maybeScheduleProactiveQueryTime(conn)
 		}
 	case PxcSpeedConf:
 		s.emitEvent(*event)
@@ -643,9 +731,17 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 		// The dashes that ask this ask once, right after the handshake, so a
 		// missed answer is a clock never set rather than one that drifts. The
 		// body is JSON here, not the binary stamp above.
+		// Marking the question answered first cancels the unsolicited wait
+		// started from CLIENT_INFO, so a dash that already syncs (the common
+		// Voge path) never receives a second 0x10451.
+		s.noteQueryTimeAnswered()
 		s.emitEvent(*event)
 		body := s.queryTimeAckBody()
-		logging.Printf("Answering PXC QUERY_TIME with %d body bytes", len(body))
+		if s.skipDashClockSync {
+			logging.Printf("Answering PXC QUERY_TIME with empty body (dash clock sync skipped)")
+		} else {
+			logging.Printf("Answering PXC QUERY_TIME with %d body bytes", len(body))
+		}
 		response := &PXCResponse{Command: PxcQueryTimeAck, Body: body}
 		if err := s.writeResponse(response, conn, nil); err != nil {
 			s.emitError(s.connectionError(conn, PxcWriteErr, err))

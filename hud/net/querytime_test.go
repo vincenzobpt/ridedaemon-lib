@@ -118,6 +118,22 @@ func TestQueryTimeZoneIDPrefersTheHostSuppliedID(t *testing.T) {
 	}
 }
 
+func TestHuTimeLooksLikeUptimeRejectsASetWallClock(t *testing.T) {
+	// Field values from SSDQ01-0120 logs on 2026-09-02/08.
+	if !huTimeLooksLikeUptime(1581550) {
+		t.Error("Moscow reconnect currentHUTime=1581550 must look like uptime")
+	}
+	if !huTimeLooksLikeUptime(3346122) {
+		t.Error("VOGE-5G-dc41 currentHUTime=3346122 must look like uptime")
+	}
+	if huTimeLooksLikeUptime(1788466877642) {
+		t.Error("set-clock currentHUTime=1788466877642 must not look like uptime")
+	}
+	if !huTimeLooksLikeUptime(0) {
+		t.Error("missing/zero currentHUTime must look like uptime")
+	}
+}
+
 func TestQueryTimeAckIsAnsweredWithCmdPlusOne(t *testing.T) {
 	// The reply command is what the dash correlates on; getting it wrong is
 	// silent, so it is asserted rather than assumed.
