@@ -112,6 +112,11 @@ type MobileConfig struct {
 	// Go's local location - UTC on Android - and dashes were being set hours
 	// wrong. See net.PXCControl.SetTimeZoneOffsetSeconds.
 	TimeZoneOffsetSeconds int
+	// SkipDashClockSync answers 0x10450 with an empty body and never pushes
+	// unsolicited clock JSON. For SSDQ01-0120 units that ask for time but keep
+	// currentHUTime as uptime (01.01.1970 on the TFT). Default false leaves
+	// panel-A Voge units on the JSON path that already sets their clock.
+	SkipDashClockSync bool
 }
 
 func NewMobileConfig(static []byte, fps int, startupTimeoutSec, teardownTimeoutSec, discTimeout, discTries int) *MobileConfig {
@@ -192,6 +197,7 @@ func NewMobileSession(cfg *MobileConfig, cb MobileCallback) (*MobileSession, err
 	if cfg.TimeZoneID != "" {
 		ms.hud.SetTimeZoneOffsetSeconds(cfg.TimeZoneOffsetSeconds)
 	}
+	ms.hud.SetSkipDashClockSync(cfg.SkipDashClockSync)
 	go func() {
 		for {
 			select {

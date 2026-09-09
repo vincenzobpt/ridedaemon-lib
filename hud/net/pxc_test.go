@@ -264,6 +264,137 @@ func TestQueryTimeEmitsTheAckAsAnEventTooNotJustTheRequest(t *testing.T) {
 	assertNoPXCError(t, control)
 }
 
+func TestSkipDashClockSyncAnswersQueryTimeWithAnEmptyBody(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	control.SetSkipDashClockSync(true)
+	control.HudConfig = &HUDConfig{CurrentHUTime: 3346122}
+	request := &PXCResponse{Command: PxcQueryTime}
+	responses := handlePXCEventAndReadResponses(t, control, request, 1)
+	if responses[0].Command != PxcQueryTimeAck {
+		t.Fatalf("ACK command = 0x%x, want 0x%x", responses[0].Command, PxcQueryTimeAck)
+	}
+	if len(responses[0].Body) != 0 {
+		t.Fatalf("ACK body length = %d, want empty so the dash is not written a wall clock", len(responses[0].Body))
+	}
+	assertNoPXCError(t, control)
+}
+
+func TestProactiveQueryTimeAckWaitsWhenTheDashNeverAsks(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	control.SetTimeZoneID("Europe/Moscow")
+	control.SetTimeZoneOffsetSeconds(3 * 60 * 60)
+	control.HudConfig = &HUDConfig{CurrentHUTime: 1581550}
+	control.queryTimeGrace = 30 * time.Millisecond
+
+	client, server := stdnet.Pipe()
+	defer client.Close()
+	defer server.Close()
+	if err := server.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	control.maybeScheduleProactiveQueryTime(client)
+	response := readPXCResponse(t, server)
+	if response.Command != PxcQueryTimeAck {
+		t.Fatalf("unsolicited command = 0x%x, want 0x%x", response.Command, PxcQueryTimeAck)
+	}
+	got := decodeQueryTime(t, response.Body)
+	if want := float64(3 * 60 * 60 * 1000); got["currentTime"].(float64)-got["time"].(float64) != want {
+		t.Errorf("currentTime - time = %v, want Moscow offset %v", got["currentTime"].(float64)-got["time"].(float64), want)
+	}
+	if got["currentTimeZone"] != "Europe/Moscow" {
+		t.Errorf("currentTimeZone = %v, want Europe/Moscow", got["currentTimeZone"])
+	}
+	select {
+	case evt := <-control.Events:
+		if evt.Command != PxcQueryTimeAck {
+			t.Fatalf("emitted command = 0x%x, want the unsolicited ack", evt.Command)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unsolicited ack was never emitted as an event")
+	}
+	assertNoPXCError(t, control)
+}
+
+func TestProactiveQueryTimeAckDoesNotFireWhenTheDashAsks(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	control.HudConfig = &HUDConfig{CurrentHUTime: 857545}
+	control.queryTimeGrace = 80 * time.Millisecond
+
+	client, server := stdnet.Pipe()
+	defer client.Close()
+	defer server.Close()
+	if err := server.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	control.maybeScheduleProactiveQueryTime(client)
+	done := make(chan struct{})
+	go func() {
+		control.handleEvent(&PXCResponse{Command: PxcQueryTime}, client)
+		close(done)
+	}()
+	first := readPXCResponse(t, server)
+	if first.Command != PxcQueryTimeAck {
+		t.Fatalf("solicited command = 0x%x, want 0x%x", first.Command, PxcQueryTimeAck)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("solicited QUERY_TIME handler did not complete")
+	}
+
+	if err := server.SetReadDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, 1)
+	if _, err := server.Read(buffer); err == nil {
+		t.Fatal("a second QUERY_TIME_ACK was written after the dash already asked")
+	}
+	assertNoPXCError(t, control)
+}
+
+func TestProactiveQueryTimeAckSkipsADashWhoseClockIsAlreadySet(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	control.HudConfig = &HUDConfig{CurrentHUTime: 1788466877642}
+	control.queryTimeGrace = 30 * time.Millisecond
+
+	client, server := stdnet.Pipe()
+	defer client.Close()
+	defer server.Close()
+	if err := server.SetReadDeadline(time.Now().Add(120 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+
+	control.maybeScheduleProactiveQueryTime(client)
+	buffer := make([]byte, 1)
+	if _, err := server.Read(buffer); err == nil {
+		t.Fatal("unsolicited QUERY_TIME_ACK was sent to a dash that already has a wall clock")
+	}
+	assertNoPXCError(t, control)
+}
+
+func TestProactiveQueryTimeAckDoesNotFireWhenClockSyncIsSkipped(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	control.SetSkipDashClockSync(true)
+	control.HudConfig = &HUDConfig{CurrentHUTime: 3346122}
+	control.queryTimeGrace = 30 * time.Millisecond
+
+	client, server := stdnet.Pipe()
+	defer client.Close()
+	defer server.Close()
+	if err := server.SetReadDeadline(time.Now().Add(120 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+
+	control.maybeScheduleProactiveQueryTime(client)
+	buffer := make([]byte, 1)
+	if _, err := server.Read(buffer); err == nil {
+		t.Fatal("unsolicited QUERY_TIME_ACK was sent while dash clock sync is skipped")
+	}
+	assertNoPXCError(t, control)
+}
+
 // The bike establishes this port twice - CAR_CTRL and CAR_DATA - and then stops
 // servicing the channel it has nothing to say on, which the note at the top of
 // pxc.go has called normal since the protocol was first written down. That

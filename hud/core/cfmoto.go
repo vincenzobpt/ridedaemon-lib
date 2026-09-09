@@ -80,6 +80,7 @@ type CfmotoHUD struct {
 	timeZoneID            string
 	timeZoneOffsetSec     int
 	timeZoneOffsetSet     bool
+	skipDashClockSync     bool
 
 	// net management
 	keyPair      *net.KeyPair
@@ -166,6 +167,15 @@ func (hud *CfmotoHUD) SetTimeZoneOffsetSeconds(seconds int) {
 	defer hud.mu.Unlock()
 	hud.timeZoneOffsetSec = seconds
 	hud.timeZoneOffsetSet = true
+}
+
+// SetSkipDashClockSync answers QUERY_TIME with an empty ACK and does not push
+// unsolicited clock JSON. See net.PXCControl.SetSkipDashClockSync. Configure
+// it before StartStream.
+func (hud *CfmotoHUD) SetSkipDashClockSync(skip bool) {
+	hud.mu.Lock()
+	defer hud.mu.Unlock()
+	hud.skipDashClockSync = skip
 }
 
 func (hud *CfmotoHUD) handleServerEvent(evt any) {
@@ -377,6 +387,7 @@ func (hud *CfmotoHUD) startStream(ctx context.Context, initConn stdnet.Conn) (er
 	if hud.timeZoneOffsetSet {
 		pxcServer.SetTimeZoneOffsetSeconds(hud.timeZoneOffsetSec)
 	}
+	pxcServer.SetSkipDashClockSync(hud.skipDashClockSync)
 	hud.startPxcEventFwd(pxcServer, pxcReady)
 	// PXC error handling
 	go func() {
