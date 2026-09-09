@@ -87,6 +87,7 @@ type CfmotoHUD struct {
 	proactivePxcHeartbeat bool
 	plainVideoFraming     bool
 	pageSwitchProbe       bool
+	jpegStills            bool
 	timeZoneID            string
 	timeZoneOffsetSec     int
 	timeZoneOffsetSet     bool
@@ -169,6 +170,17 @@ func (hud *CfmotoHUD) SetPageSwitchProbe(enabled bool) {
 	hud.mu.Lock()
 	defer hud.mu.Unlock()
 	hud.pageSwitchProbe = enabled
+}
+
+// SetJpegStills answers the capture negotiation with encoder=1 (JPEG) instead of echoing the
+// encoder the dash asked for, and tells the live source its payloads are whole pictures rather
+// than H.264 access units. The phone must be feeding stills when this is on - the daemon does
+// not transcode anything, it only changes what is negotiated and what the queue will accept.
+// Configure it before StartStream.
+func (hud *CfmotoHUD) SetJpegStills(enabled bool) {
+	hud.mu.Lock()
+	defer hud.mu.Unlock()
+	hud.jpegStills = enabled
 }
 
 // SetTimeZoneID supplies the host's IANA zone id for the PXC QUERY_TIME reply.
@@ -432,6 +444,7 @@ func (hud *CfmotoHUD) startStream(ctx context.Context, initConn stdnet.Conn) (er
 	}()
 	mediaControl := net.NewMediaControl(":10921")
 	mediaControl.SupportFunction = hud.supportFunction
+	mediaControl.JpegStills = hud.jpegStills
 	// STREAM_START is the latest moment that still precedes a single painted pixel: the
 	// dash has negotiated the capture and said it wants the stream. If a page command is
 	// what unblocks its UI, this is where it belongs.

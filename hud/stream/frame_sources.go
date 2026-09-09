@@ -240,6 +240,11 @@ type LiveStreamSource struct {
 	lastInput   time.Time
 	liveTimeout time.Duration
 	awaitIDR    bool
+	// opaque means the payloads pushed here are not H.264 access units and must be
+	// forwarded byte-for-byte: no IDR gate on the way in, no NAL inspection before a
+	// repeat on the way out. It exists for the dashboards that negotiate JPEG stills,
+	// where every payload is self-contained and the IDR rules would drop all of them.
+	opaque bool
 }
 
 func NewLiveStreamSource(targetFPS int, liveTimeout time.Duration, maxQ int) *LiveStreamSource {
@@ -265,7 +270,21 @@ func NewLiveStreamSource(targetFPS int, liveTimeout time.Duration, maxQ int) *Li
 	}
 }
 
-// PushFrame is called by a live encoder, expected H.264 AU in Annex B aud + sps/pps + idr
+// SetOpaquePayloads switches the source to forwarding whole self-contained payloads -
+// JPEG stills - instead of H.264 access units. Call it before the first push: it also
+// disarms the IDR wait the constructor armed, which would otherwise silently drop every
+// still ever pushed, since no JPEG carries a NAL of type 5.
+func (s *LiveStreamSource) SetOpaquePayloads(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.opaque = enabled
+	if enabled {
+		s.awaitIDR = false
+	}
+}
+
+// PushFrame is called by a live encoder, expected H.264 AU in Annex B aud + sps/pps + idr,
+// or a whole self-contained payload when SetOpaquePayloads is on.
 func (s *LiveStreamSource) PushFrame(au []byte) {
 	if len(au) == 0 {
 		return
@@ -277,7 +296,7 @@ func (s *LiveStreamSource) PushFrame(au []byte) {
 	now := time.Now()
 	s.active = true
 	s.lastInput = now
-	if s.awaitIDR {
+	if s.awaitIDR && !s.opaque {
 		if !hasAnnexBNALType(au, 5) {
 			return
 		}
@@ -311,7 +330,7 @@ func (s *LiveStreamSource) PrepareForConsumer() {
 	s.tail = 0
 	s.lastAU = nil
 	s.lastAdvance = time.Time{}
-	s.awaitIDR = true
+	s.awaitIDR = !s.opaque
 }
 
 func (s *LiveStreamSource) IsActive(now time.Time) bool {
@@ -336,7 +355,7 @@ func (s *LiveStreamSource) resetLocked() {
 	s.count = 0
 	s.head = 0
 	s.tail = 0
-	s.awaitIDR = true
+	s.awaitIDR = !s.opaque
 }
 
 func hasAnnexBNALType(data []byte, wanted byte) bool {
@@ -395,8 +414,10 @@ func (s *LiveStreamSource) NextFrame(now time.Time) ([]byte, error) {
 		return au, nil
 	}
 
-	// No queued frames? Repeating is only decode-safe for an IDR.
-	if s.lastAU != nil && hasAnnexBNALType(s.lastAU, 5) {
+	// No queued frames? Repeating is only decode-safe for an IDR - or for an opaque
+	// payload, where every frame is a whole picture by definition. That repeat is what
+	// keeps a dash polling at 30 Hz fed from a source producing ten stills a second.
+	if s.lastAU != nil && (s.opaque || hasAnnexBNALType(s.lastAU, 5)) {
 		s.lastAdvance = now
 		return s.lastAU, nil
 	}

@@ -107,6 +107,11 @@ type MobileConfig struct {
 	// none of it. Off for everything else: it puts three unsolicited commands on the
 	// wire that no reference implementation sends. See net.PXCControl.SetPageSwitchProbe.
 	PageSwitchProbeEnabled bool
+	// JpegStillsEnabled negotiates encoder=1 (JPEG) with the dash instead of echoing the
+	// H.264 it asked for, and switches the live queue to forwarding whole payloads. The
+	// host must be pushing stills through PushStill when this is on; nothing here
+	// transcodes. Off for every dashboard but the one the experiment is aimed at.
+	JpegStillsEnabled bool
 	// TimeZoneID is the host's IANA zone id ("Europe/Rome"), sent in the
 	// QUERY_TIME reply. Android must supply it: Go's local location carries no
 	// usable name on a device. Empty falls back to a fixed-offset id.
@@ -186,6 +191,9 @@ func NewMobileSession(cfg *MobileConfig, cb MobileCallback) (*MobileSession, err
 	// dropping frames of a predictive (GOP/intra-refresh) stream, while keeping
 	// worst-case buffered latency low. Overflow still drops the oldest AU.
 	live := stream.NewLiveStreamSource(cfg.TargetFPS, 3*time.Second, 6)
+	// Before anything is pushed: the constructor arms an IDR wait that no JPEG can ever
+	// satisfy, so leaving it armed would drop every still in silence.
+	live.SetOpaquePayloads(cfg.JpegStillsEnabled)
 	ms.mux = &stream.MuxSource{NoSignal: static, Live: live}
 
 	// Build streamer
@@ -196,6 +204,7 @@ func NewMobileSession(cfg *MobileConfig, cb MobileCallback) (*MobileSession, err
 	ms.hud.SetProactivePxcHeartbeat(cfg.ProactivePxcHeartbeatEnabled)
 	ms.hud.SetPlainVideoFramingAllowed(cfg.PlainVideoFramingAllowed)
 	ms.hud.SetPageSwitchProbe(cfg.PageSwitchProbeEnabled)
+	ms.hud.SetJpegStills(cfg.JpegStillsEnabled)
 	ms.hud.SetTimeZoneID(cfg.TimeZoneID)
 	// Only together with the id: an offset on its own would silently pin the
 	// clock replies to UTC for a host that never configured a zone, which is the
@@ -380,6 +389,31 @@ func (ms *MobileSession) PushFrame(avccChunk []byte) {
 	}
 
 	ms.mux.Live.PushFrame(au)
+}
+
+// PushStill hands the dash one whole JPEG. It exists beside PushFrame rather than inside it
+// because the two payloads share nothing: a still needs no AVCC-to-Annex-B conversion, has no
+// NAL to inspect, and must not be measured against the IDR rules that make sense of a
+// predictive stream. Only useful with MobileConfig.JpegStillsEnabled, which is what makes the
+// queue accept these and the capture negotiation announce them.
+func (ms *MobileSession) PushStill(jpeg []byte) {
+	if !ms.hud.IsRunning() {
+		return
+	}
+	if len(jpeg) == 0 {
+		return
+	}
+	if !ms.cfg.JpegStillsEnabled {
+		// Pushing a still into a session that negotiated H.264 would put a JPEG on the wire
+		// inside a frame the dash is parsing as an access unit. Refusing loudly beats that.
+		if ms.cb != nil {
+			go ms.cb.OnError("PushStill called on a session that did not negotiate JPEG", false)
+		}
+		logging.Printf("MobileSession: PushStill ignored, JpegStillsEnabled is off\n")
+		return
+	}
+
+	ms.mux.Live.PushFrame(jpeg)
 }
 
 func (ms *MobileSession) IsRunning() bool {

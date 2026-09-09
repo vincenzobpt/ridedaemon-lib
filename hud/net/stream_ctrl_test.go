@@ -18,7 +18,7 @@ func TestMediaCaptureAckUsesRequestedCFDL26Dimensions(t *testing.T) {
 	binary.LittleEndian.PutUint32(request[8:12], 2)
 	request[29] = 0
 
-	assertMediaCaptureAck(t, buildMediaCaptureAckPayload(request), 2, 720, 704, 0)
+	assertMediaCaptureAck(t, buildMediaCaptureAckPayload(request, false), 2, 720, 704, 0)
 }
 
 func TestMediaCaptureAckPreservesLegacyNegotiation(t *testing.T) {
@@ -28,11 +28,38 @@ func TestMediaCaptureAckPreservesLegacyNegotiation(t *testing.T) {
 	binary.LittleEndian.PutUint32(request[8:12], 2)
 	request[29] = 1
 
-	assertMediaCaptureAck(t, buildMediaCaptureAckPayload(request), 2, 800, 384, 1)
+	assertMediaCaptureAck(t, buildMediaCaptureAckPayload(request, false), 2, 800, 384, 1)
 }
 
 func TestMediaCaptureAckFallsBackForMissingPayload(t *testing.T) {
-	assertMediaCaptureAck(t, buildMediaCaptureAckPayload(nil), 2, 800, 384, 1)
+	assertMediaCaptureAck(t, buildMediaCaptureAckPayload(nil, false), 2, 800, 384, 1)
+}
+
+// The QJ 5-inch dash's exact request: 800x352, wantEncoder=2 (H264), plain framing. With the
+// experiment on, the reply must say JPEG while everything else - the 16-aligned geometry the
+// dash asked for, and the framing byte it declared - is echoed untouched, because those two
+// are not what the experiment is changing.
+func TestMediaCaptureAckOffersJpegWhenTheExperimentIsOn(t *testing.T) {
+	request := make([]byte, 204)
+	binary.LittleEndian.PutUint16(request[0:2], 800)
+	binary.LittleEndian.PutUint16(request[2:4], 352)
+	binary.LittleEndian.PutUint32(request[8:12], 2)
+	request[29] = 0
+
+	assertMediaCaptureAck(t, buildMediaCaptureAckPayload(request, true), 1, 800, 352, 0)
+}
+
+// The experiment must never reach a dashboard that did not ask for it: the same request with
+// the flag off has to keep answering H.264, or every streaming dash in the fleet changes wire
+// format at once.
+func TestMediaCaptureAckKeepsH264WhenTheExperimentIsOff(t *testing.T) {
+	request := make([]byte, 204)
+	binary.LittleEndian.PutUint16(request[0:2], 800)
+	binary.LittleEndian.PutUint16(request[2:4], 352)
+	binary.LittleEndian.PutUint32(request[8:12], 2)
+	request[29] = 0
+
+	assertMediaCaptureAck(t, buildMediaCaptureAckPayload(request, false), 2, 800, 352, 0)
 }
 
 func TestMediaStartPreparesConsumerBeforeAcknowledgement(t *testing.T) {

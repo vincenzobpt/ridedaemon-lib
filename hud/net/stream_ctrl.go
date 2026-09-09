@@ -24,6 +24,15 @@ const (
 	MediaCtrlPing       uint16 = 64
 )
 
+// Video codec ids carried in REQ_RV_CONFIG_CAPTURE's wantEncoder and echoed in the reply.
+// The values are EasyConn's own: ECTinyPlus.proto declares
+// VideoCodecType { NONE=0, JEPG=1, H264=2, MP4=3 }, and net.easyconn.carman's mirror sender
+// branches on exactly this field to choose between JPEG stills and an H.264 stream.
+const (
+	mediaEncoderJpeg uint32 = 1
+	mediaEncoderH264 uint32 = 2
+)
+
 // Command responses
 const (
 	MediaCtrlAck       uint16 = 17
@@ -61,6 +70,11 @@ type MediaControl struct {
 	Events          chan MediaCtrlResponse
 	OnVideoStart    func()
 	SupportFunction int
+	// JpegStills answers REQ_RV_CONFIG_CAPTURE with encoder=1 (JPEG) whatever the dash
+	// asked for. It is an experiment, not a negotiation: the reply is where the official
+	// EasyConn app writes the encoder it will actually use, and one dash family asks for
+	// H.264, drains the stream and paints nothing. See buildMediaCaptureAckPayload.
+	JpegStills bool
 	// OnCaptureNegotiated reports the supportExtendProtocol byte the dash asked for
 	// and we echoed back, once the capture-config reply is on the wire.
 	OnCaptureNegotiated func(extended bool)
@@ -190,7 +204,7 @@ func (s *MediaControl) handleEvent(event *MediaCtrlResponse, conn net.Conn) {
 	switch event.Command {
 	case MediaCtrlInit:
 		s.emitEvent(*event)
-		payload := buildMediaCaptureAckPayload(event.Payload)
+		payload := buildMediaCaptureAckPayload(event.Payload, s.JpegStills)
 		response := &MediaCtrlResponse{Command: MediaCtrlAck, Size: uint16(len(payload)), Payload: payload}
 		if err := s.writeResponse(response, conn); err != nil {
 			s.emitError(s.connectionError(conn, CtrlWriteErr, err))
@@ -244,8 +258,16 @@ func (s *MediaControl) handleEvent(event *MediaCtrlResponse, conn net.Conn) {
 	}
 }
 
-func buildMediaCaptureAckPayload(request []byte) []byte {
-	encoder := uint32(2)
+// buildMediaCaptureAckPayload builds RLY_RV_CONFIG_CAPTURE, the reply that tells the dash
+// which encoder, geometry and framing the phone will actually use.
+//
+// forceJpeg answers encoder=1 (VideoCodecType.JEPG in EasyConn's own ECTinyPlus.proto:
+// NONE=0, JEPG=1, H264=2, MP4=3) even when the dash asked for H.264. That is deliberate and
+// is the whole experiment: the official app dispatches its mirror sender on this field, and
+// a dash that asks for H.264 while painting none of the H.264 it pulls is the one case where
+// offering it the other format is worth a rider's session. Everything else keeps the echo.
+func buildMediaCaptureAckPayload(request []byte, forceJpeg bool) []byte {
+	encoder := mediaEncoderH264
 	width := uint16(800)
 	height := uint16(384)
 	extendedProtocol := byte(1)
@@ -267,6 +289,9 @@ func buildMediaCaptureAckPayload(request []byte) []byte {
 	}
 	if len(request) >= 30 {
 		extendedProtocol = request[29]
+	}
+	if forceJpeg {
+		encoder = mediaEncoderJpeg
 	}
 
 	payload := make([]byte, 9)
