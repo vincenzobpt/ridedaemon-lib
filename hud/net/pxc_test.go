@@ -395,6 +395,69 @@ func TestProactiveQueryTimeAckDoesNotFireWhenClockSyncIsSkipped(t *testing.T) {
 	assertNoPXCError(t, control)
 }
 
+// A dashboard the host has seen ask for the time on an earlier connection must
+// never be raced, however slow this handshake happens to be. A VOGE-040785 log
+// (2026-09-09) has one asking at +1.964s through +2.465s across seven handshakes:
+// under the old two-second window six of the seven were handed an unsolicited
+// packet on top of the answer they asked for.
+func TestProactiveQueryTimeAckNeverRacesADashKnownToAsk(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	control.SetDashAsksForTime(true)
+	// Everything else says "push": the clock reads as uptime and sync is on.
+	control.HudConfig = &HUDConfig{CurrentHUTime: 3346122}
+	control.queryTimeGrace = 30 * time.Millisecond
+
+	client, server := stdnet.Pipe()
+	defer client.Close()
+	defer server.Close()
+	if err := server.SetReadDeadline(time.Now().Add(120 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+
+	control.maybeScheduleProactiveQueryTime(client)
+	buffer := make([]byte, 1)
+	if _, err := server.Read(buffer); err == nil {
+		t.Fatal("unsolicited QUERY_TIME_ACK was sent to a dash already known to ask for the time")
+	}
+	assertNoPXCError(t, control)
+}
+
+// The suppression is opt-in per dashboard: a unit the host has never seen ask
+// must still be offered the push, or the panel that never asks goes back to
+// showing 01.01.1970 forever.
+func TestProactiveQueryTimeAckStillFiresForADashNotKnownToAsk(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	control.SetDashAsksForTime(false)
+	control.HudConfig = &HUDConfig{CurrentHUTime: 3346122}
+	control.queryTimeGrace = 30 * time.Millisecond
+
+	client, server := stdnet.Pipe()
+	defer client.Close()
+	defer server.Close()
+	if err := server.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+
+	control.maybeScheduleProactiveQueryTime(client)
+	response := readPXCResponse(t, server)
+	if response.Command != PxcQueryTimeAck {
+		t.Fatalf("unsolicited command = 0x%x, want 0x%x", response.Command, PxcQueryTimeAck)
+	}
+	assertNoPXCError(t, control)
+}
+
+// The grace period is the margin, not a second guess at the same number: it has
+// to clear the slowest ask ever recorded in the field by a wide margin, because
+// losing the race is what hands a rider's hand-set clock a second packet.
+func TestQueryTimeGraceClearsTheSlowestObservedAsk(t *testing.T) {
+	// VOGE-040785, 2026-09-09: the slowest of seven handshakes asked at +2.465s.
+	const slowestObservedAsk = 2465 * time.Millisecond
+	control := NewPXCControl(":0", nil, nil)
+	if got := control.queryTimeGracePeriod(); got <= slowestObservedAsk {
+		t.Fatalf("grace = %v, want more than the slowest observed ask %v", got, slowestObservedAsk)
+	}
+}
+
 // The bike establishes this port twice - CAR_CTRL and CAR_DATA - and then stops
 // servicing the channel it has nothing to say on, which the note at the top of
 // pxc.go has called normal since the protocol was first written down. That

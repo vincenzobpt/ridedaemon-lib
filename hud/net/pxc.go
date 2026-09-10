@@ -195,6 +195,7 @@ type PXCControl struct {
 	timeZoneOffsetSec  int
 	timeZoneOffsetSet  bool
 	skipDashClockSync  bool
+	dashAsksForTime    bool
 
 	queryTimeMu            sync.Mutex
 	queryTimeAnswered      bool
@@ -285,6 +286,25 @@ func (s *PXCControl) SetSkipDashClockSync(skip bool) {
 	s.skipDashClockSync = skip
 }
 
+// SetDashAsksForTime records that this dashboard has been seen sending 0x10450
+// on an earlier connection, and suppresses the unsolicited push entirely. The
+// solicited answer is untouched: the dash still asks and is still told the time.
+//
+// The grace period alone cannot decide this. It is a race against however long
+// this particular handshake took, and a dash that asks at +2.4s one session can
+// ask at +5.1s the next on a slower phone or a busier link - so any fixed window
+// eventually loses and hands a second clock packet to a unit that never needed
+// one. Whether a dash asks at all, by contrast, is a stable property of its
+// firmware: seen once, it holds. The host remembers it per dashboard fingerprint
+// and tells us here, which turns a timing guess into a fact.
+//
+// Deliberately not inferred inside this package: a PXCControl lives for one
+// session and cannot remember the previous one, which is the whole point.
+// Configure it before Start.
+func (s *PXCControl) SetDashAsksForTime(asks bool) {
+	s.dashAsksForTime = asks
+}
+
 // queryTimeAckBody and huTimeSyncAckBody exist so the two clock answers cannot
 // be wired to a bare time.Now() again without a test noticing: the wiring, not
 // the formatting, is what was wrong in the field.
@@ -327,9 +347,16 @@ func (s *PXCControl) queryTimeGracePeriod() time.Duration {
 // maybeScheduleProactiveQueryTime pushes one 0x10451 if this dash reports an
 // unset clock and never asks 0x10450. A dash that already asks is unchanged:
 // the solicited handler marks the question answered and this wait exits.
-// SkipDashClockSync also bails out: those units must not receive clock JSON.
+// SkipDashClockSync also bails out: those units must not receive clock JSON,
+// and so does DashAsksForTime, which is the host telling us this dashboard
+// asked on an earlier connection - see SetDashAsksForTime for why the grace
+// period on its own is not enough to decide that.
 func (s *PXCControl) maybeScheduleProactiveQueryTime(conn net.Conn) {
 	if s.skipDashClockSync {
+		return
+	}
+	if s.dashAsksForTime {
+		// Seen asking on an earlier connection. Do not race its question.
 		return
 	}
 	if s.HudConfig == nil || !huTimeLooksLikeUptime(s.HudConfig.CurrentHUTime) {

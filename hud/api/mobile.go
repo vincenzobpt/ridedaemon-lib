@@ -127,6 +127,13 @@ type MobileConfig struct {
 	// currentHUTime as uptime (01.01.1970 on the TFT). Default false leaves
 	// panel-A Voge units on the JSON path that already sets their clock.
 	SkipDashClockSync bool
+	// DashAsksForTime says this dashboard sent 0x10450 on an earlier connection,
+	// so the unsolicited clock push is not started at all. Only the host can know
+	// this - a session cannot remember the one before it - and only the host keeps
+	// it, per dashboard fingerprint rather than per motorcycle, because it is a
+	// property of the firmware. Default false: an unknown dash is still offered
+	// the push after the grace period.
+	DashAsksForTime bool
 }
 
 func NewMobileConfig(static []byte, fps int, startupTimeoutSec, teardownTimeoutSec, discTimeout, discTries int) *MobileConfig {
@@ -213,6 +220,7 @@ func NewMobileSession(cfg *MobileConfig, cb MobileCallback) (*MobileSession, err
 		ms.hud.SetTimeZoneOffsetSeconds(cfg.TimeZoneOffsetSeconds)
 	}
 	ms.hud.SetSkipDashClockSync(cfg.SkipDashClockSync)
+	ms.hud.SetDashAsksForTime(cfg.DashAsksForTime)
 	go func() {
 		for {
 			select {

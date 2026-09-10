@@ -92,6 +92,7 @@ type CfmotoHUD struct {
 	timeZoneOffsetSec     int
 	timeZoneOffsetSet     bool
 	skipDashClockSync     bool
+	dashAsksForTime       bool
 
 	// net management
 	keyPair      *net.KeyPair
@@ -208,6 +209,15 @@ func (hud *CfmotoHUD) SetSkipDashClockSync(skip bool) {
 	hud.mu.Lock()
 	defer hud.mu.Unlock()
 	hud.skipDashClockSync = skip
+}
+
+// SetDashAsksForTime suppresses the unsolicited clock push for a dashboard the
+// host has already seen asking for the time. See net.PXCControl.SetDashAsksForTime.
+// Configure it before StartStream.
+func (hud *CfmotoHUD) SetDashAsksForTime(asks bool) {
+	hud.mu.Lock()
+	defer hud.mu.Unlock()
+	hud.dashAsksForTime = asks
 }
 
 func (hud *CfmotoHUD) handleServerEvent(evt any) {
@@ -435,6 +445,7 @@ func (hud *CfmotoHUD) startStream(ctx context.Context, initConn stdnet.Conn) (er
 		pxcServer.SetTimeZoneOffsetSeconds(hud.timeZoneOffsetSec)
 	}
 	pxcServer.SetSkipDashClockSync(hud.skipDashClockSync)
+	pxcServer.SetDashAsksForTime(hud.dashAsksForTime)
 	hud.startPxcEventFwd(pxcServer, pxcReady)
 	// PXC error handling
 	go func() {

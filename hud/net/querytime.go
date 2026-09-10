@@ -33,7 +33,23 @@ const (
 	// ~150ms of the handshake; a unit that reconnects through CHECK_SN and
 	// never asks (log 2026-09-02, VOGE-5G-dafc) waits out this window and then
 	// gets the same JSON ACK the asking path already sends.
-	defaultQueryTimeGrace = 2 * time.Second
+	//
+	// It was two seconds, and two seconds was measured to be wrong. A VOGE-040785
+	// log (2026-09-09, seven handshakes in eight minutes) has that dash asking at
+	// +1.964, +2.078, +2.242, +2.343, +2.345, +2.379 and +2.465 seconds after
+	// CLIENT_INFO: six of the seven lost the race by 78-465 ms and were handed an
+	// unsolicited packet on top of the answer they had asked for, which is the one
+	// thing the unsolicited path promises never to do. The window is not a property
+	// of the firmware, it is a property of how busy the handshake was, so the fix is
+	// a margin, not a different constant of the same size. Five seconds is more than
+	// twice the slowest ask ever recorded.
+	//
+	// Waiting longer costs a dash that genuinely never asks three extra seconds of
+	// 01.01.1970 on a TFT that was already showing 01.01.1970 - it cannot make that
+	// case worse. Sending a second packet to a dash that did ask can overwrite a
+	// clock its rider set by hand, which is the failure this constant exists to
+	// avoid. The two risks are not symmetric and the margin belongs on this side.
+	defaultQueryTimeGrace = 5 * time.Second
 
 	// currentHUTime below this is boot/uptime milliseconds, not a 2024+ wall
 	// clock. 1e11 ms is March 1973; a live Voge reports ~1.7e12 when its clock
