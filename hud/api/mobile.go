@@ -112,6 +112,20 @@ type MobileConfig struct {
 	// host must be pushing stills through PushStill when this is on; nothing here
 	// transcodes. Off for every dashboard but the one the experiment is aimed at.
 	JpegStillsEnabled bool
+	// AppStatusNotifyEnabled makes the phone push ECP_P2C_APPSTATUS_BACKGROUND the way
+	// the official EasyConn app does: once when PXC comes up, and again - as "the
+	// mirror is live" - when the dash starts pulling frames. It is the only statement
+	// the official app ever volunteers that a mirror exists, and no reference
+	// implementation sends it. Off for every dashboard that paints a picture today.
+	// See net.PXCControl.SetAppStatusNotify.
+	AppStatusNotifyEnabled bool
+	// PhoneScreenWidth, PhoneScreenHeight and PhoneScreenRotation are the phone's own
+	// display metrics, carried inside that notification exactly as the official app
+	// reads them off Display.getRealSize() and getRotation(). Only the host can know
+	// them; zero is sent as zero rather than guessed.
+	PhoneScreenWidth    int
+	PhoneScreenHeight   int
+	PhoneScreenRotation int
 	// TimeZoneID is the host's IANA zone id ("Europe/Rome"), sent in the
 	// QUERY_TIME reply. Android must supply it: Go's local location carries no
 	// usable name on a device. Empty falls back to a fixed-offset id.
@@ -212,6 +226,8 @@ func NewMobileSession(cfg *MobileConfig, cb MobileCallback) (*MobileSession, err
 	ms.hud.SetPlainVideoFramingAllowed(cfg.PlainVideoFramingAllowed)
 	ms.hud.SetPageSwitchProbe(cfg.PageSwitchProbeEnabled)
 	ms.hud.SetJpegStills(cfg.JpegStillsEnabled)
+	ms.hud.SetAppStatusNotify(cfg.AppStatusNotifyEnabled)
+	ms.hud.SetPhoneScreen(cfg.PhoneScreenWidth, cfg.PhoneScreenHeight, cfg.PhoneScreenRotation)
 	ms.hud.SetTimeZoneID(cfg.TimeZoneID)
 	// Only together with the id: an offset on its own would silently pin the
 	// clock replies to UTC for a host that never configured a zone, which is the

@@ -158,6 +158,13 @@ type PhoneConfig struct {
 	EncryptedHUID     string `json:"encryptedHUID"`
 	BluetoothName     string `json:"bluetoothName"`
 	SupportH264IFrame bool   `json:"supportH264IFrame"`
+	// The official app always states a supportFunction in this reply
+	// (ECP_C2P_CLIENT_INFO.g0(), which writes it unless the caller has already supplied
+	// one), and so does open-cflink's captured handshake. This daemon did not, and the
+	// value it does compute went only into the RLY for MEDIA_CONTROL 0x60 - which
+	// firmware that runs supportExtendProtocol=0 never asks for, so on those units the
+	// number was never stated at all.
+	SupportFunction int `json:"supportFunction"`
 	// There is deliberately no supportSyncCorrectTime here. It was added on
 	// 2026-08-10 on the theory that a Carbit dash only asks a phone that claims
 	// the capability, and removed the same day: the reference implementation
@@ -212,6 +219,13 @@ type PXCControl struct {
 	// can decline to run, so a rider's log says which command was on the wire when the
 	// panel did or did not move.
 	OnPageSwitchProbe func(step PageSwitchProbeStep, command uint32, err error)
+
+	// The phone-to-car mirroring notification; see appstatus.go.
+	appStatus appStatusState
+	// OnAppStatus reports each ECP_P2C_APPSTATUS_BACKGROUND this session put on the
+	// wire, so a rider's log carries the mode and whether the write landed. The dash's
+	// own 0x20031 ack arrives separately, through the unhandled-response branch.
+	OnAppStatus func(mode int, err error)
 }
 
 type pxcConnectionState struct {
@@ -692,6 +706,10 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 			}
 			s.emitEvent(*response)
 			s.maybeScheduleProactiveQueryTime(conn)
+			// The official app sends its first APPSTATUS_BACKGROUND as soon as PXC is
+			// up (vf.s.b0()), before any capture is negotiated. This is that moment:
+			// the handshake the dash opened with has just been answered.
+			s.SendAppStatus(AppStatusBackground)
 		}
 	case PxcSpeedConf:
 		s.emitEvent(*event)

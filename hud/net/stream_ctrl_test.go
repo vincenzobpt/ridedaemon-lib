@@ -128,8 +128,15 @@ func assertMediaCaptureAck(
 	wantExtended byte,
 ) {
 	t.Helper()
-	if len(payload) != 9 {
-		t.Fatalf("payload length = %d, want 9", len(payload))
+	// Protocol.RlyConfigCapture.size(): 9 bytes only when the extend-protocol byte is
+	// non-zero, 8 otherwise. Asserting the length here rather than in one test keeps
+	// every case above honest about the shape the official app would have written.
+	wantLen := 8
+	if wantExtended != 0 {
+		wantLen = 9
+	}
+	if len(payload) != wantLen {
+		t.Fatalf("payload length = %d, want %d", len(payload), wantLen)
 	}
 	if got := binary.LittleEndian.Uint32(payload[0:4]); got != wantEncoder {
 		t.Fatalf("encoder = %d, want %d", got, wantEncoder)
@@ -140,8 +147,42 @@ func assertMediaCaptureAck(
 	if got := binary.LittleEndian.Uint16(payload[6:8]); got != wantHeight {
 		t.Fatalf("height = %d, want %d", got, wantHeight)
 	}
-	if got := payload[8]; got != wantExtended {
-		t.Fatalf("extended protocol = %d, want %d", got, wantExtended)
+	if wantExtended != 0 {
+		if got := payload[8]; got != wantExtended {
+			t.Fatalf("extended protocol = %d, want %d", got, wantExtended)
+		}
+	}
+}
+
+// A QJ 5-inch panel declares supportExtendProtocol=0 in every CAPTURE_CONFIG. Protocol.RlyConfigCapture in the CarbitRide APK answers such a dash
+// with 8 bytes and appends the framing byte only when it is non-zero; this daemon sent
+// 9 either way. The trailing zero is what is being removed here, and the transport must
+// still be told the framing is plain.
+func TestMediaCaptureAckOmitsTheFramingByteWhenTheDashDeclaresNone(t *testing.T) {
+	request := make([]byte, 204)
+	binary.LittleEndian.PutUint16(request[0:2], 800)
+	binary.LittleEndian.PutUint16(request[2:4], 352)
+	binary.LittleEndian.PutUint32(request[8:12], 2)
+	request[29] = 0
+
+	payload := buildMediaCaptureAckPayload(request, false)
+	if len(payload) != 8 {
+		t.Fatalf("payload length = %d, want 8", len(payload))
+	}
+
+	control := NewMediaControl(":0")
+	reported := true
+	called := false
+	control.OnCaptureNegotiated = func(extended bool) { reported, called = extended, true }
+	server, client := net.Pipe()
+	go func() { io.Copy(io.Discard, client) }()
+	control.handleEvent(&MediaCtrlResponse{Command: MediaCtrlInit, Payload: request}, server)
+	server.Close()
+	if !called {
+		t.Fatal("OnCaptureNegotiated was never called for an 8-byte reply")
+	}
+	if reported {
+		t.Fatal("OnCaptureNegotiated reported extended framing for a dash that declared none")
 	}
 }
 

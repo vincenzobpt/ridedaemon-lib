@@ -210,8 +210,12 @@ func (s *MediaControl) handleEvent(event *MediaCtrlResponse, conn net.Conn) {
 			s.emitError(s.connectionError(conn, CtrlWriteErr, err))
 			break
 		}
-		if s.OnCaptureNegotiated != nil && len(payload) >= 9 {
-			s.OnCaptureNegotiated(payload[8] != 0)
+		// Read the framing decision from the payload we built, not from its length:
+		// an 8-byte reply is now the normal shape for a dash that asked for no extend
+		// protocol, and treating it as "nothing to report" would have silently stopped
+		// the transport from being told which framing this session uses.
+		if s.OnCaptureNegotiated != nil {
+			s.OnCaptureNegotiated(len(payload) >= 9 && payload[8] != 0)
 		}
 	case MediaCtrlScreenConf:
 		s.emitEvent(*event)
@@ -294,11 +298,23 @@ func buildMediaCaptureAckPayload(request []byte, forceJpeg bool) []byte {
 		encoder = mediaEncoderJpeg
 	}
 
-	payload := make([]byte, 9)
+	// Protocol.RlyConfigCapture.size() in the CarbitRide APK returns 8 unless
+	// supportExtendProtocol is non-zero, and toByteArray() appends the byte only in
+	// that case. This built a 9-byte reply either way, so every dashboard that runs
+	// without the extend protocol - which is the whole family that reports
+	// supportExtendProtocol=0, a QJ 5-inch panel among them - was being handed a
+	// trailing zero the official app never sends.
+	size := 8
+	if extendedProtocol != 0 {
+		size = 9
+	}
+	payload := make([]byte, size)
 	binary.LittleEndian.PutUint32(payload[0:4], encoder)
 	binary.LittleEndian.PutUint16(payload[4:6], width)
 	binary.LittleEndian.PutUint16(payload[6:8], height)
-	payload[8] = extendedProtocol
+	if size == 9 {
+		payload[8] = extendedProtocol
+	}
 	logging.Printf(
 		"Media capture negotiated encoder=%d width=%d height=%d extended=%d",
 		encoder,
