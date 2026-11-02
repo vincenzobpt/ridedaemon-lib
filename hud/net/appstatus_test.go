@@ -70,6 +70,24 @@ func TestAppStatusBackgroundModeIsAlwaysUpright(t *testing.T) {
 	}
 }
 
+// enableAccessibility is the host's word that it acts on the dash's touches; it must
+// follow TouchInput and never be claimed when the host did not say so.
+func TestAppStatusClaimsTouchInputOnlyWhenTheHostDoes(t *testing.T) {
+	for _, touch := range []bool{false, true} {
+		body, err := buildAppStatusBody(PhoneScreen{Width: 1080, Height: 2400, TouchInput: touch}, AppStatusMirrorLive)
+		if err != nil {
+			t.Fatalf("build body: %v", err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if got["enableAccessibility"] != touch || got["enableAOAHid"] != false {
+			t.Fatalf("touch=%v body = %s", touch, body)
+		}
+	}
+}
+
 // Off by default, and silent when off: every dashboard in the fleet that paints a
 // picture today does it without ever having seen this command from us.
 func TestAppStatusStaysOffUnlessAsked(t *testing.T) {

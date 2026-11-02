@@ -204,12 +204,13 @@ func (hud *CfmotoHUD) SetAppStatusNotify(enabled bool) {
 	hud.appStatusNotify = enabled
 }
 
-// SetPhoneScreen supplies the display metrics that notification carries. Only the host
-// can know them. Configure it before StartStream.
-func (hud *CfmotoHUD) SetPhoneScreen(width, height, rotation int) {
+// SetPhoneScreen supplies the display metrics that notification carries, and whether the
+// host acts on the dash's touches. Only the host can know them. Configure it before
+// StartStream.
+func (hud *CfmotoHUD) SetPhoneScreen(width, height, rotation int, touchInput bool) {
 	hud.mu.Lock()
 	defer hud.mu.Unlock()
-	hud.phoneScreen = net.PhoneScreen{Width: width, Height: height, Rotation: rotation}
+	hud.phoneScreen = net.PhoneScreen{Width: width, Height: height, Rotation: rotation, TouchInput: touchInput}
 }
 
 // SetTimeZoneID supplies the host's IANA zone id for the PXC QUERY_TIME reply.

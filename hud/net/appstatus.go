@@ -69,6 +69,11 @@ type PhoneScreen struct {
 	Width    int
 	Height   int
 	Rotation int
+	// TouchInput is the host saying it acts on the dash's touches. It is written as
+	// enableAccessibility, the flag the official app sets when its accessibility service
+	// can inject them: the 1000 MT-X paints our picture and never sends a touch, while the
+	// official app, which states this flag, gets them.
+	TouchInput bool
 }
 
 // appStatusState is the per-session half of this file.
@@ -118,15 +123,15 @@ func buildAppStatusBody(screen PhoneScreen, mode int) ([]byte, error) {
 	}
 
 	// Key order does not matter to a JSON reader, and the names are the ones the SDK
-	// writes. enableAccessibility and enableAOAHid are false and will stay false: both
-	// describe input paths the official app owns on the phone and this library does not
-	// have - claiming either would be advertising for work nothing here can do.
+	// writes. enableAccessibility follows TouchInput: the host only sets it when it really
+	// forwards the dash's touches. enableAOAHid stays false - USB HID is an input path this
+	// library does not have.
 	return json.Marshal(map[string]any{
 		"mode":                mode,
 		"displayRotation":     rotation,
 		"width":               width,
 		"height":              height,
-		"enableAccessibility": false,
+		"enableAccessibility": screen.TouchInput,
 		"enableAOAHid":        false,
 	})
 }
