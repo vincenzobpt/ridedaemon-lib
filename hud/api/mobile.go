@@ -130,6 +130,10 @@ type MobileConfig struct {
 	// forwards the dash's touches, the way the official app does through its
 	// accessibility service. Only meaningful with AppStatusNotifyEnabled.
 	AppStatusTouchInput bool
+	// AppStatusLiveOnly sends only the "mirror is live" notification, never the one
+	// when PXC comes up: the CFMOTO app's behaviour. See
+	// net.PXCControl.SetAppStatusLiveOnly.
+	AppStatusLiveOnly bool
 	// TimeZoneID is the host's IANA zone id ("Europe/Rome"), sent in the
 	// QUERY_TIME reply. Android must supply it: Go's local location carries no
 	// usable name on a device. Empty falls back to a fixed-offset id.
@@ -231,6 +235,7 @@ func NewMobileSession(cfg *MobileConfig, cb MobileCallback) (*MobileSession, err
 	ms.hud.SetPageSwitchProbe(cfg.PageSwitchProbeEnabled)
 	ms.hud.SetJpegStills(cfg.JpegStillsEnabled)
 	ms.hud.SetAppStatusNotify(cfg.AppStatusNotifyEnabled)
+	ms.hud.SetAppStatusLiveOnly(cfg.AppStatusLiveOnly)
 	ms.hud.SetPhoneScreen(cfg.PhoneScreenWidth, cfg.PhoneScreenHeight, cfg.PhoneScreenRotation, cfg.AppStatusTouchInput)
 	ms.hud.SetTimeZoneID(cfg.TimeZoneID)
 	// Only together with the id: an offset on its own would silently pin the

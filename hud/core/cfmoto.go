@@ -96,6 +96,7 @@ type CfmotoHUD struct {
 	pageSwitchProbe       bool
 	jpegStills            bool
 	appStatusNotify       bool
+	appStatusLiveOnly     bool
 	phoneScreen           net.PhoneScreen
 	timeZoneID            string
 	timeZoneOffsetSec     int
@@ -202,6 +203,14 @@ func (hud *CfmotoHUD) SetAppStatusNotify(enabled bool) {
 	hud.mu.Lock()
 	defer hud.mu.Unlock()
 	hud.appStatusNotify = enabled
+}
+
+// SetAppStatusLiveOnly keeps that notification to mode 1, the only one the CFMOTO app
+// sends. Configure it before StartStream. See net.PXCControl.SetAppStatusLiveOnly.
+func (hud *CfmotoHUD) SetAppStatusLiveOnly(liveOnly bool) {
+	hud.mu.Lock()
+	defer hud.mu.Unlock()
+	hud.appStatusLiveOnly = liveOnly
 }
 
 // SetPhoneScreen supplies the display metrics that notification carries, and whether the
@@ -470,6 +479,7 @@ func (hud *CfmotoHUD) startStream(ctx context.Context, initConn stdnet.Conn) (er
 		})
 	}
 	pxcServer.SetAppStatusNotify(hud.appStatusNotify)
+	pxcServer.SetAppStatusLiveOnly(hud.appStatusLiveOnly)
 	pxcServer.SetPhoneScreen(hud.phoneScreen)
 	pxcServer.OnAppStatus = func(mode int, err error) {
 		payload := make([]byte, 2)

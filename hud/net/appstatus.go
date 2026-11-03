@@ -54,7 +54,8 @@ const (
 	AppStatusMirrorLive = 1
 	// AppStatusBackground is "the phone is connected but not mirroring". It is the only
 	// mode that overrides the geometry with the phone's upright dimensions, which is
-	// what kh.b.a(2) does.
+	// what kh.b.a(2) does. The CFMOTO app's SDK names it ECP_MIRROR_MODE_SPLIT, and
+	// that app never sends it: see SetAppStatusLiveOnly.
 	AppStatusBackground = 2
 	// AppStatusOverlay is the third mode the official app can send, when it mirrors
 	// underneath its own overlay. Nothing here produces it; it is named so the constant
@@ -78,10 +79,11 @@ type PhoneScreen struct {
 
 // appStatusState is the per-session half of this file.
 type appStatusState struct {
-	mu      sync.Mutex
-	enabled bool
-	screen  PhoneScreen
-	sent    map[int]bool
+	mu       sync.Mutex
+	enabled  bool
+	liveOnly bool
+	screen   PhoneScreen
+	sent     map[int]bool
 }
 
 // SetAppStatusNotify enables the ECP_P2C_APPSTATUS_BACKGROUND notifications above.
@@ -92,6 +94,17 @@ func (s *PXCControl) SetAppStatusNotify(enabled bool) {
 	s.appStatus.mu.Lock()
 	defer s.appStatus.mu.Unlock()
 	s.appStatus.enabled = enabled
+}
+
+// SetAppStatusLiveOnly limits the notification to mode 1, the way the CFMOTO app does.
+// Its listener answers isSendCurrentMirrorStateBySelf() with
+// sendCurrentStateToCarBySelf(true, false), so the only app status it ever sends is
+// mode 1, after DATA_START - never mode 2 when PXC comes up. The 1000 MT-X closes its
+// command socket within milliseconds of a mode 2, in every session of a field log.
+func (s *PXCControl) SetAppStatusLiveOnly(liveOnly bool) {
+	s.appStatus.mu.Lock()
+	defer s.appStatus.mu.Unlock()
+	s.appStatus.liveOnly = liveOnly
 }
 
 // SetPhoneScreen supplies the display metrics the body carries. Zero dimensions are
@@ -142,7 +155,8 @@ func buildAppStatusBody(screen PhoneScreen, mode int) ([]byte, error) {
 // says STREAM_START twice must not be told twice that the mirror went live.
 func (s *PXCControl) SendAppStatus(mode int) {
 	s.appStatus.mu.Lock()
-	enabled, screen := s.appStatus.enabled, s.appStatus.screen
+	enabled := s.appStatus.enabled && (!s.appStatus.liveOnly || mode == AppStatusMirrorLive)
+	screen := s.appStatus.screen
 	already := s.appStatus.sent[mode]
 	if enabled && !already {
 		if s.appStatus.sent == nil {

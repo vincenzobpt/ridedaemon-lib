@@ -117,6 +117,22 @@ func TestAppStatusSendsEachModeOnce(t *testing.T) {
 	}
 }
 
+// The CFMOTO app only ever says mode 1, and the 1000 MT-X hangs up on a mode 2.
+func TestAppStatusLiveOnlyNeverSendsBackground(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	control.SetAppStatusNotify(true)
+	control.SetAppStatusLiveOnly(true)
+	var modes []int
+	control.OnAppStatus = func(mode int, err error) { modes = append(modes, mode) }
+
+	control.SendAppStatus(AppStatusBackground)
+	control.SendAppStatus(AppStatusMirrorLive)
+
+	if len(modes) != 1 || modes[0] != AppStatusMirrorLive {
+		t.Fatalf("modes reported = %v, want only mode 1", modes)
+	}
+}
+
 // decodeNumbers pulls the numeric fields out of a body that also carries booleans.
 func decodeNumbers(t *testing.T, body []byte) map[string]float64 {
 	t.Helper()
