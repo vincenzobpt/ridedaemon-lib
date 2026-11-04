@@ -97,6 +97,7 @@ type CfmotoHUD struct {
 	jpegStills            bool
 	appStatusNotify       bool
 	appStatusLiveOnly     bool
+	cfmotoAppReplies      bool
 	phoneScreen           net.PhoneScreen
 	timeZoneID            string
 	timeZoneOffsetSec     int
@@ -211,6 +212,15 @@ func (hud *CfmotoHUD) SetAppStatusLiveOnly(liveOnly bool) {
 	hud.mu.Lock()
 	defer hud.mu.Unlock()
 	hud.appStatusLiveOnly = liveOnly
+}
+
+// SetCfmotoAppReplies makes the CLIENT_INFO and CHECK_APP_NETWORKING_CAPABILITY replies
+// match the CFMOTO app. Configure it before StartStream. See
+// net.PXCControl.SetCfmotoAppReplies.
+func (hud *CfmotoHUD) SetCfmotoAppReplies(enabled bool) {
+	hud.mu.Lock()
+	defer hud.mu.Unlock()
+	hud.cfmotoAppReplies = enabled
 }
 
 // SetPhoneScreen supplies the display metrics that notification carries, and whether the
@@ -480,6 +490,7 @@ func (hud *CfmotoHUD) startStream(ctx context.Context, initConn stdnet.Conn) (er
 	}
 	pxcServer.SetAppStatusNotify(hud.appStatusNotify)
 	pxcServer.SetAppStatusLiveOnly(hud.appStatusLiveOnly)
+	pxcServer.SetCfmotoAppReplies(hud.cfmotoAppReplies)
 	pxcServer.SetPhoneScreen(hud.phoneScreen)
 	pxcServer.OnAppStatus = func(mode int, err error) {
 		payload := make([]byte, 2)

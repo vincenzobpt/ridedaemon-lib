@@ -49,6 +49,66 @@ func TestCheckSnSendsAckAndPositiveResult(t *testing.T) {
 	assertNoPXCError(t, control)
 }
 
+func TestCheckAppNetworkingIsAnEmptyAckByDefault(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	responses := handlePXCEventAndReadResponses(t, control, &PXCResponse{Command: PxcCheckAppNetworking}, 1)
+
+	if responses[0].Command != PxcCheckAppNetworkingAck {
+		t.Fatalf("ACK command = 0x%x, want 0x%x", responses[0].Command, PxcCheckAppNetworkingAck)
+	}
+	if len(responses[0].Body) != 0 {
+		t.Fatalf("ACK body = %q, want empty", responses[0].Body)
+	}
+	assertNoPXCError(t, control)
+}
+
+func TestCheckAppNetworkingAnswersStatusZeroLikeTheCfmotoApp(t *testing.T) {
+	control := NewPXCControl(":0", nil, &PhoneConfig{})
+	control.SetCfmotoAppReplies(true)
+	responses := handlePXCEventAndReadResponses(t, control, &PXCResponse{Command: PxcCheckAppNetworking}, 1)
+
+	if responses[0].Command != PxcCheckAppNetworkingAck {
+		t.Fatalf("ACK command = 0x%x, want 0x%x", responses[0].Command, PxcCheckAppNetworkingAck)
+	}
+	if string(responses[0].Body) != `{"status":0}` {
+		t.Fatalf("ACK body = %q, want {\"status\":0}", responses[0].Body)
+	}
+	assertNoPXCError(t, control)
+}
+
+func TestPhoneConfigStatesSupportFunctionUnlessTheCfmotoAppRepliesAreOn(t *testing.T) {
+	config := &PhoneConfig{PxcVersion: "1.0.2", SupportFunction: 128}
+	control := NewPXCControl(":0", nil, config)
+
+	keys := func() map[string]any {
+		t.Helper()
+		b, err := json.Marshal(control.PhoneConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+
+	if got := keys()["supportFunction"]; got != float64(128) {
+		t.Fatalf("supportFunction = %v, want 128", got)
+	}
+	control.SetCfmotoAppReplies(true)
+	m := keys()
+	if _, ok := m["supportFunction"]; ok {
+		t.Fatalf("supportFunction still written: %v", m)
+	}
+	if m["pxcVersion"] != "1.0.2" {
+		t.Fatalf("other fields lost: %v", m)
+	}
+	if _, ok := m["OmitSupportFunction"]; ok {
+		t.Fatalf("the switch itself leaked into the reply: %v", m)
+	}
+}
+
 func TestUnknownOddPXCResponseIsNotAcknowledged(t *testing.T) {
 	control := NewPXCControl(":0", nil, nil)
 	client, server := stdnet.Pipe()

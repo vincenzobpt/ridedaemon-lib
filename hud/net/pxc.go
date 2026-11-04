@@ -48,6 +48,10 @@ const (
 	// The other clock question, answered with JSON instead of a binary stamp.
 	// Firmware picks one or the other, never both: see querytime.go.
 	PxcQueryTime uint32 = 0x10450
+	// ECP_C2P_CHECK_APP_NETWORKING_CAPABILITY. The 1000 MT-X asks it every two seconds
+	// for as long as the session lives. The official app answers {"status":0|1}; the
+	// default branch below answers with an empty body. See SetCfmotoAppReplies.
+	PxcCheckAppNetworking uint32 = 0x10750
 )
 
 // Command responses
@@ -61,6 +65,8 @@ const (
 	PxcCheckSnDone   uint32 = PxcCheckSnResult + 1
 	PxcHuTimeSyncAck uint32 = PxcHuTimeSync + 1
 	PxcQueryTimeAck  uint32 = PxcQueryTime + 1
+
+	PxcCheckAppNetworkingAck uint32 = PxcCheckAppNetworking + 1
 )
 
 type checkSnRequest struct {
@@ -164,6 +170,8 @@ type PhoneConfig struct {
 	// value it does compute went only into the RLY for MEDIA_CONTROL 0x60 - which
 	// firmware that runs supportExtendProtocol=0 never asks for, so on those units the
 	// number was never stated at all.
+	// The CFMOTO app is the exception: its build of the SDK writes supportFunction only
+	// when the caller passes a map, and that app passes none. See OmitSupportFunction.
 	SupportFunction int `json:"supportFunction"`
 	// There is deliberately no supportSyncCorrectTime here. It was added on
 	// 2026-08-10 on the theory that a Carbit dash only asks a phone that claims
@@ -178,6 +186,24 @@ type PhoneConfig struct {
 	// the work is what caused harm. Do not re-add this without a rider log
 	// showing a dash that stays silent until it is claimed.
 	AppVersionFingerPrint string `json:"appVersionFingerPrint"`
+	// OmitSupportFunction leaves supportFunction out of this reply. The CFMOTO app
+	// (jadx-225) calls ECP_C2P_CLIENT_INFO.reply() with no map, and reply() only writes
+	// supportFunction when a caller map is given - so that app never states it. Set by
+	// SetCfmotoAppReplies.
+	OmitSupportFunction bool `json:"-"`
+}
+
+// MarshalJSON drops supportFunction when OmitSupportFunction is set; otherwise the
+// reply is the plain struct encoding it always was.
+func (c PhoneConfig) MarshalJSON() ([]byte, error) {
+	type plain PhoneConfig
+	if !c.OmitSupportFunction {
+		return json.Marshal(plain(c))
+	}
+	return json.Marshal(struct {
+		plain
+		SupportFunction *int `json:"supportFunction,omitempty"`
+	}{plain: plain(c)})
 }
 
 type PXCControl struct {
@@ -203,6 +229,7 @@ type PXCControl struct {
 	timeZoneOffsetSet  bool
 	skipDashClockSync  bool
 	dashAsksForTime    bool
+	cfmotoAppReplies   bool
 
 	queryTimeMu            sync.Mutex
 	queryTimeAnswered      bool
@@ -251,6 +278,19 @@ func NewPXCControl(port string, kp *KeyPair, config *PhoneConfig) *PXCControl {
 		Errors:      make(chan error, 16),
 		KeyPair:     kp,
 		PhoneConfig: config,
+	}
+}
+
+// SetCfmotoAppReplies makes two replies match the CFMOTO app byte for byte: the
+// CLIENT_INFO reply without supportFunction, and CHECK_APP_NETWORKING_CAPABILITY
+// answered {"status":0}. That app's own callback never implements the question, so the
+// SDK default false is what goes on the wire. Opt-in, for the dash that paints our
+// picture and never sends us a touch while it sends them to that app. Configure it
+// before Start.
+func (s *PXCControl) SetCfmotoAppReplies(enabled bool) {
+	s.cfmotoAppReplies = enabled
+	if s.PhoneConfig != nil {
+		s.PhoneConfig.OmitSupportFunction = enabled
 	}
 }
 
@@ -759,6 +799,17 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 	case PxcCheckSnDone:
 		// The bike acknowledges the phone-originated CHECK_SN_RESULT.
 		s.emitEvent(*event)
+	case PxcCheckAppNetworking:
+		// Without SetCfmotoAppReplies this is exactly the default branch: an empty cmd+1.
+		s.emitEvent(*event)
+		var body []byte
+		if s.cfmotoAppReplies {
+			body = []byte(`{"status":0}`)
+		}
+		response := &PXCResponse{Command: PxcCheckAppNetworkingAck, Body: body}
+		if err := s.writeResponse(response, conn, nil); err != nil {
+			s.emitError(s.connectionError(conn, PxcWriteErr, err))
+		}
 	case PxcHuTimeSync:
 		// Same shape as the default even-command branch - emit, then ACK with
 		// cmd+1 - except the body carries the wall-clock time the dash asked

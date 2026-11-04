@@ -134,6 +134,10 @@ type MobileConfig struct {
 	// when PXC comes up: the CFMOTO app's behaviour. See
 	// net.PXCControl.SetAppStatusLiveOnly.
 	AppStatusLiveOnly bool
+	// CfmotoAppReplies answers two PXC questions the way the CFMOTO app does: no
+	// supportFunction in the CLIENT_INFO reply, and {"status":0} to
+	// CHECK_APP_NETWORKING_CAPABILITY. See net.PXCControl.SetCfmotoAppReplies.
+	CfmotoAppReplies bool
 	// TimeZoneID is the host's IANA zone id ("Europe/Rome"), sent in the
 	// QUERY_TIME reply. Android must supply it: Go's local location carries no
 	// usable name on a device. Empty falls back to a fixed-offset id.
@@ -236,6 +240,7 @@ func NewMobileSession(cfg *MobileConfig, cb MobileCallback) (*MobileSession, err
 	ms.hud.SetJpegStills(cfg.JpegStillsEnabled)
 	ms.hud.SetAppStatusNotify(cfg.AppStatusNotifyEnabled)
 	ms.hud.SetAppStatusLiveOnly(cfg.AppStatusLiveOnly)
+	ms.hud.SetCfmotoAppReplies(cfg.CfmotoAppReplies)
 	ms.hud.SetPhoneScreen(cfg.PhoneScreenWidth, cfg.PhoneScreenHeight, cfg.PhoneScreenRotation, cfg.AppStatusTouchInput)
 	ms.hud.SetTimeZoneID(cfg.TimeZoneID)
 	// Only together with the id: an offset on its own would silently pin the
