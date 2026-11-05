@@ -284,9 +284,11 @@ func NewPXCControl(port string, kp *KeyPair, config *PhoneConfig) *PXCControl {
 // SetCfmotoAppReplies makes two replies match the CFMOTO app byte for byte: the
 // CLIENT_INFO reply without supportFunction, and CHECK_APP_NETWORKING_CAPABILITY
 // answered {"status":0}. That app's own callback never implements the question, so the
-// SDK default false is what goes on the wire. Opt-in, for the dash that paints our
-// picture and never sends us a touch while it sends them to that app. Configure it
-// before Start.
+// SDK default false is what goes on the wire. It also sends phone-originated requests
+// on CAR_DATA like that app (see requestConn), beats there, and states enableAOAHid in
+// the app status.
+// Opt-in, for the dash that paints our picture and never sends us a touch while it
+// sends them to that app. Configure it before Start.
 func (s *PXCControl) SetCfmotoAppReplies(enabled bool) {
 	s.cfmotoAppReplies = enabled
 	if s.PhoneConfig != nil {
@@ -663,9 +665,11 @@ func (s *PXCControl) writeResponse(res *PXCResponse, conn net.Conn, raw *[]byte)
 
 // Keep one selected PXC channel alive with empty 0x70000000 frames. A separate
 // loop is required for CAR_CTRL and CAR_DATA because either idle socket can
-// trigger a firmware-side teardown.
+// trigger a firmware-side teardown. The CFMOTO app beats on CAR_DATA alone, its request
+// channel, so SetCfmotoAppReplies does the same.
 func (s *PXCControl) startChannelHeartbeat(conn net.Conn, channel string) {
-	if !s.proactiveHeartbeat || s.isStopping() {
+	beats := s.proactiveHeartbeat || (s.cfmotoAppReplies && channel == "CAR_DATA")
+	if !beats || s.isStopping() {
 		return
 	}
 	state := s.connectionState(conn)
@@ -787,8 +791,9 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 			break
 		}
 		response := &PXCResponse{Command: PxcCheckSnResult, Body: body}
-		if err := s.writeResponse(response, conn, nil); err != nil {
-			s.emitError(s.connectionError(conn, PxcWriteErr, err))
+		target := s.requestConn(conn)
+		if err := s.writeResponse(response, target, nil); err != nil {
+			s.emitError(s.connectionError(target, PxcWriteErr, err))
 		}
 	case PxcHeartbeat:
 		s.emitEvent(*event) // Necessary to indicate PXC finished

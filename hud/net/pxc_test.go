@@ -49,6 +49,107 @@ func TestCheckSnSendsAckAndPositiveResult(t *testing.T) {
 	assertNoPXCError(t, control)
 }
 
+// openCarData names a connection CAR_DATA the way the dash does, and hands back the
+// dash's end of it.
+func openCarData(t *testing.T, control *PXCControl) stdnet.Conn {
+	t.Helper()
+	dash, phone := stdnet.Pipe()
+	t.Cleanup(func() {
+		dash.Close()
+		phone.Close()
+	})
+	if err := dash.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	go control.handleEvent(&PXCResponse{Command: PxcChannelCarData}, phone)
+	if got := readPXCResponse(t, dash); got.Command != PxcChannelCarData+1 {
+		t.Fatalf("CAR_DATA select answered 0x%x", got.Command)
+	}
+	return dash
+}
+
+func TestCheckSnResultGoesOnCarDataLikeTheCfmotoApp(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	control.SetCfmotoAppReplies(true)
+	carData := openCarData(t, control)
+
+	result := make(chan PXCResponse, 1)
+	go func() {
+		result <- readPXCResponse(t, carData)
+	}()
+	responses := handlePXCEventAndReadResponses(t, control, &PXCResponse{
+		Command: PxcClientSet,
+		Body:    json.RawMessage(`{"client_set":"easy_conn","sn":"SERIAL-123"}`),
+	}, 1)
+
+	if responses[0].Command != PxcCheckSnAck {
+		t.Fatalf("CHECK_SN socket got 0x%x, want only the ack", responses[0].Command)
+	}
+	if got := <-result; got.Command != PxcCheckSnResult {
+		t.Fatalf("CAR_DATA got 0x%x, want 0x%x", got.Command, PxcCheckSnResult)
+	}
+	assertNoPXCError(t, control)
+}
+
+func TestAppStatusGoesOnCarDataAndStatesAOAHidLikeTheCfmotoApp(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	control.SetCfmotoAppReplies(true)
+	control.SetAppStatusNotify(true)
+	carData := openCarData(t, control)
+
+	go control.SendAppStatus(AppStatusMirrorLive)
+	got := readPXCResponse(t, carData)
+
+	if got.Command != PxcAppStatus {
+		t.Fatalf("CAR_DATA got 0x%x, want 0x%x", got.Command, PxcAppStatus)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(got.Body, &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["enableAOAHid"] != true {
+		t.Fatalf("enableAOAHid = %v, want true", body["enableAOAHid"])
+	}
+}
+
+func TestCfmotoAppBeatsOnCarDataAlone(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	control.SetCfmotoAppReplies(true)
+	control.heartbeatInterval = 5 * time.Millisecond
+	defer close(control.quit)
+	carData := openCarData(t, control)
+
+	if got := readPXCResponse(t, carData); got.Command != PxcHeartbeat {
+		t.Fatalf("CAR_DATA got 0x%x, want a heartbeat", got.Command)
+	}
+
+	dash, phone := stdnet.Pipe()
+	defer dash.Close()
+	defer phone.Close()
+	go control.handleEvent(&PXCResponse{Command: PxcHandshake}, phone)
+	if got := readPXCResponse(t, dash); got.Command != PxcHandshakeOk {
+		t.Fatalf("handshake answered 0x%x", got.Command)
+	}
+	if err := dash.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := dash.Read(make([]byte, 1)); err == nil {
+		t.Fatalf("CAR_CTRL got %d unexpected bytes", n)
+	}
+}
+
+// Every other dash keeps the connection it has always been answered on.
+func TestRequestConnIgnoresCarDataByDefault(t *testing.T) {
+	control := NewPXCControl(":0", nil, nil)
+	openCarData(t, control)
+	_, fallback := stdnet.Pipe()
+	defer fallback.Close()
+
+	if got := control.requestConn(fallback); got != fallback {
+		t.Fatalf("requestConn left the fallback: %v", got)
+	}
+}
+
 func TestCheckAppNetworkingIsAnEmptyAckByDefault(t *testing.T) {
 	control := NewPXCControl(":0", nil, nil)
 	responses := handlePXCEventAndReadResponses(t, control, &PXCResponse{Command: PxcCheckAppNetworking}, 1)

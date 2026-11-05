@@ -120,6 +120,36 @@ func (s *PXCControl) controlConn() net.Conn {
 	return latest
 }
 
+// requestConn picks the connection for a phone-originated request. The EasyConn SDK
+// keeps the two 10922 connections apart: on the one opened with PxcHandshake the dash
+// asks and the phone answers, on the one opened with PxcChannelCarData the phone asks
+// and the dash answers, and that is the only place its command queue ever writes.
+//
+// Only with SetCfmotoAppReplies, because every other dash has been running on the
+// fallback. A dash that has not opened CAR_DATA gets the fallback too.
+func (s *PXCControl) requestConn(fallback net.Conn) net.Conn {
+	if !s.cfmotoAppReplies {
+		return fallback
+	}
+	found := fallback
+	s.connections.Range(func(key, value any) bool {
+		state, ok := value.(*pxcConnectionState)
+		if !ok {
+			return true
+		}
+		conn, ok := key.(net.Conn)
+		if !ok {
+			return true
+		}
+		if name, _ := state.channel.Load().(string); name == "CAR_DATA" {
+			found = conn
+			return false
+		}
+		return true
+	})
+	return found
+}
+
 // StartPageSwitchProbe runs the page sequence once, in the background. Calling it
 // again on the same session does nothing, so a dash that says STREAM_START twice does
 // not get six commands.

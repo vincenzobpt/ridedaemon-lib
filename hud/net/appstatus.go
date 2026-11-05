@@ -75,6 +75,9 @@ type PhoneScreen struct {
 	// can inject them: the 1000 MT-X paints our picture and never sends a touch, while the
 	// official app, which states this flag, gets them.
 	TouchInput bool
+	// AOAHid is written as enableAOAHid. The official app's field defaults to true and
+	// nothing in its CFMOTO build turns it off, USB or not.
+	AOAHid bool
 }
 
 // appStatusState is the per-session half of this file.
@@ -137,15 +140,15 @@ func buildAppStatusBody(screen PhoneScreen, mode int) ([]byte, error) {
 
 	// Key order does not matter to a JSON reader, and the names are the ones the SDK
 	// writes. enableAccessibility follows TouchInput: the host only sets it when it really
-	// forwards the dash's touches. enableAOAHid stays false - USB HID is an input path this
-	// library does not have.
+	// forwards the dash's touches. enableAOAHid is false unless SendAppStatus was asked to
+	// match the CFMOTO app - USB HID is an input path this library does not have.
 	return json.Marshal(map[string]any{
 		"mode":                mode,
 		"displayRotation":     rotation,
 		"width":               width,
 		"height":              height,
 		"enableAccessibility": screen.TouchInput,
-		"enableAOAHid":        false,
+		"enableAOAHid":        screen.AOAHid,
 	})
 }
 
@@ -173,13 +176,14 @@ func (s *PXCControl) SendAppStatus(mode int) {
 	// The same choice the page probe had to make, and for the same dashboard: this
 	// firmware never names its PXC channel, so anything that insisted on CAR_CTRL would
 	// go silent on the only panel this exists for. See controlConn.
-	conn := s.controlConn()
+	conn := s.requestConn(s.controlConn())
 	if conn == nil {
 		logging.Printf("PXC app status: no open PXC connection to send mode=%d on", mode)
 		s.noteAppStatus(mode, fmt.Errorf("no open PXC connection"))
 		return
 	}
 
+	screen.AOAHid = s.cfmotoAppReplies
 	body, err := buildAppStatusBody(screen, mode)
 	if err != nil {
 		s.emitError(&PxcError{PxcWriteErr, fmt.Errorf("encode APPSTATUS_BACKGROUND: %w", err), true})
