@@ -230,6 +230,7 @@ type PXCControl struct {
 	skipDashClockSync  bool
 	dashAsksForTime    bool
 	cfmotoAppReplies   bool
+	touchDashIdentity  *PhoneIdentity
 
 	queryTimeMu            sync.Mutex
 	queryTimeAnswered      bool
@@ -294,6 +295,57 @@ func (s *PXCControl) SetCfmotoAppReplies(enabled bool) {
 	if s.PhoneConfig != nil {
 		s.PhoneConfig.OmitSupportFunction = enabled
 	}
+}
+
+// TouchInputDashPackage is the package_name the 1000 MT-X portrait dash states in its
+// CLIENT_INFO. It declares supportScreenTouch and supportHID, and sends its touches to the
+// CFMOTO app but never to this daemon.
+const TouchInputDashPackage = "com.cfmoto.cfdashmotoplay"
+
+// What CFMOTO RIDE 2.2.13, the build whose touch works on that dash, says about itself.
+// shortcut: the fingerprint's build hash is left empty (unreadable in the packed app); fill it
+// in if a capture shows it.
+const (
+	officialVersionCode = 145
+	officialFingerprint = "V:2.2.13(145)--ONLINE"
+)
+
+// PhoneIdentity is the real phone, as the CFMOTO app describes it in its CLIENT_INFO reply:
+// a phoneUUID kept across sessions, brand, model, SDK level and the Bluetooth adapter name.
+type PhoneIdentity struct {
+	UUID          string
+	Brand         string
+	Model         string
+	OsVersion     string
+	BluetoothName string
+}
+
+// SetTouchDashIdentity makes the CLIENT_INFO reply describe the real phone and CFMOTO RIDE
+// 2.2.13 instead of the fixed placeholder - only to the dash that names
+// TouchInputDashPackage. Experiment: if that dash pairs its touch with the phone by these
+// fields, the placeholder is why it never finds ours. nil (the default) changes nothing.
+// Configure it before Start.
+func (s *PXCControl) SetTouchDashIdentity(id *PhoneIdentity) {
+	s.touchDashIdentity = id
+}
+
+// identifyPhoneTo applies SetTouchDashIdentity when the dash that just sent conf is the one
+// it is meant for; every other dash keeps the reply it always had.
+func (s *PXCControl) identifyPhoneTo(conf *HUDConfig) {
+	id := s.touchDashIdentity
+	if id == nil || s.PhoneConfig == nil || conf == nil || conf.PackageName != TouchInputDashPackage {
+		return
+	}
+	c := s.PhoneConfig
+	if id.UUID != "" {
+		c.PhoneUUID = id.UUID
+	}
+	c.PhoneBrand = id.Brand
+	c.PhoneModel = id.Model
+	c.PhoneOsVersion = id.OsVersion
+	c.BluetoothName = id.BluetoothName
+	c.VersionCode = officialVersionCode
+	c.AppVersionFingerPrint = officialFingerprint
 }
 
 // SetProactiveHeartbeat controls the firmware-specific dual-channel keepalive.
@@ -733,6 +785,7 @@ func (s *PXCControl) handleEvent(event *PXCResponse, conn net.Conn) {
 			break
 		}
 		s.HudConfig = &conf
+		s.identifyPhoneTo(&conf)
 		// Set encrypted huid to phone config
 		if err := s.buildPC(); err != nil {
 			s.emitError(&PxcError{PxcHudCfgErr, err, true})

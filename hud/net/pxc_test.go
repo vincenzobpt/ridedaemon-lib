@@ -784,3 +784,33 @@ func TestTheDemotedPxcNoticeNamesTheAbandonedChannel(t *testing.T) {
 		t.Fatalf("the notice does not say the dash had stopped answering it: %v", err)
 	}
 }
+
+func TestTouchDashIdentityReachesOnlyTheTouchInputDash(t *testing.T) {
+	placeholder := func() *PhoneConfig {
+		return &PhoneConfig{PhoneUUID: "random", PhoneBrand: "google", PhoneModel: "Pixel 6a",
+			PhoneOsVersion: "36", VersionCode: 121, BluetoothName: "Pixel 6a",
+			AppVersionFingerPrint: "V:2.2.1(121)--ONLINE"}
+	}
+	id := &PhoneIdentity{UUID: "kept", Brand: "samsung", Model: "SM-S921B", OsVersion: "37", BluetoothName: "Galaxy S24"}
+
+	s := NewPXCControl(":0", nil, placeholder())
+	s.SetTouchDashIdentity(id)
+	s.identifyPhoneTo(&HUDConfig{PackageName: "com.cfmoto.easyconnect"})
+	if *s.PhoneConfig != *placeholder() {
+		t.Fatalf("another dash got the identity: %+v", s.PhoneConfig)
+	}
+
+	s.identifyPhoneTo(&HUDConfig{PackageName: TouchInputDashPackage})
+	want := placeholder()
+	want.PhoneUUID, want.PhoneBrand, want.PhoneModel, want.PhoneOsVersion = "kept", "samsung", "SM-S921B", "37"
+	want.BluetoothName, want.VersionCode, want.AppVersionFingerPrint = "Galaxy S24", 145, "V:2.2.13(145)--ONLINE"
+	if *s.PhoneConfig != *want {
+		t.Fatalf("got %+v, want %+v", s.PhoneConfig, want)
+	}
+
+	none := NewPXCControl(":0", nil, placeholder())
+	none.identifyPhoneTo(&HUDConfig{PackageName: TouchInputDashPackage})
+	if *none.PhoneConfig != *placeholder() {
+		t.Fatalf("no identity set, reply changed: %+v", none.PhoneConfig)
+	}
+}

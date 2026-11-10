@@ -98,6 +98,7 @@ type CfmotoHUD struct {
 	appStatusNotify       bool
 	appStatusLiveOnly     bool
 	cfmotoAppReplies      bool
+	touchDashIdentity     *net.PhoneIdentity
 	phoneScreen           net.PhoneScreen
 	timeZoneID            string
 	timeZoneOffsetSec     int
@@ -221,6 +222,15 @@ func (hud *CfmotoHUD) SetCfmotoAppReplies(enabled bool) {
 	hud.mu.Lock()
 	defer hud.mu.Unlock()
 	hud.cfmotoAppReplies = enabled
+}
+
+// SetTouchDashIdentity hands the real phone identity to the CLIENT_INFO reply of the
+// touch-input dash only. Configure it before StartStream. See
+// net.PXCControl.SetTouchDashIdentity.
+func (hud *CfmotoHUD) SetTouchDashIdentity(id *net.PhoneIdentity) {
+	hud.mu.Lock()
+	defer hud.mu.Unlock()
+	hud.touchDashIdentity = id
 }
 
 // SetPhoneScreen supplies the display metrics that notification carries, and whether the
@@ -491,6 +501,7 @@ func (hud *CfmotoHUD) startStream(ctx context.Context, initConn stdnet.Conn) (er
 	pxcServer.SetAppStatusNotify(hud.appStatusNotify)
 	pxcServer.SetAppStatusLiveOnly(hud.appStatusLiveOnly)
 	pxcServer.SetCfmotoAppReplies(hud.cfmotoAppReplies)
+	pxcServer.SetTouchDashIdentity(hud.touchDashIdentity)
 	pxcServer.SetPhoneScreen(hud.phoneScreen)
 	pxcServer.OnAppStatus = func(mode int, err error) {
 		payload := make([]byte, 2)

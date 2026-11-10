@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/charliecharlieO-o/ridedaemon-go/hud/core"
+	"github.com/charliecharlieO-o/ridedaemon-go/hud/net"
 	"github.com/charliecharlieO-o/ridedaemon-go/hud/stream"
 	"github.com/charliecharlieO-o/ridedaemon-go/internal/logging"
 )
@@ -138,6 +139,15 @@ type MobileConfig struct {
 	// supportFunction in the CLIENT_INFO reply, and {"status":0} to
 	// CHECK_APP_NETWORKING_CAPABILITY. See net.PXCControl.SetCfmotoAppReplies.
 	CfmotoAppReplies bool
+	// PhoneUUID, PhoneBrand, PhoneModel, PhoneOsVersion and PhoneBluetoothName describe
+	// the real phone in the CLIENT_INFO reply, together with CFMOTO RIDE 2.2.13's version,
+	// but only to the dash named net.TouchInputDashPackage. All empty changes nothing.
+	// See net.PXCControl.SetTouchDashIdentity.
+	PhoneUUID          string
+	PhoneBrand         string
+	PhoneModel         string
+	PhoneOsVersion     string
+	PhoneBluetoothName string
 	// TimeZoneID is the host's IANA zone id ("Europe/Rome"), sent in the
 	// QUERY_TIME reply. Android must supply it: Go's local location carries no
 	// usable name on a device. Empty falls back to a fixed-offset id.
@@ -241,6 +251,15 @@ func NewMobileSession(cfg *MobileConfig, cb MobileCallback) (*MobileSession, err
 	ms.hud.SetAppStatusNotify(cfg.AppStatusNotifyEnabled)
 	ms.hud.SetAppStatusLiveOnly(cfg.AppStatusLiveOnly)
 	ms.hud.SetCfmotoAppReplies(cfg.CfmotoAppReplies)
+	if cfg.PhoneBluetoothName != "" || cfg.PhoneModel != "" {
+		ms.hud.SetTouchDashIdentity(&net.PhoneIdentity{
+			UUID:          cfg.PhoneUUID,
+			Brand:         cfg.PhoneBrand,
+			Model:         cfg.PhoneModel,
+			OsVersion:     cfg.PhoneOsVersion,
+			BluetoothName: cfg.PhoneBluetoothName,
+		})
+	}
 	ms.hud.SetPhoneScreen(cfg.PhoneScreenWidth, cfg.PhoneScreenHeight, cfg.PhoneScreenRotation, cfg.AppStatusTouchInput)
 	ms.hud.SetTimeZoneID(cfg.TimeZoneID)
 	// Only together with the id: an offset on its own would silently pin the
